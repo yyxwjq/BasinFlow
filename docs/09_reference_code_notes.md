@@ -438,7 +438,7 @@ tests/test_seeds.py
 
 Requirements:
 
-- Start with Gaussian displacement and active-region perturbation.
+- Gaussian displacement, active-region perturbation, pseudo-velocity, and event-library motifs are seed types for the neural proposer, not standalone Stage 2 baseline goals.
 - Add pseudo-velocity / Maxwell-Boltzmann-style priors later.
 - Keep seed semantics explicit: a seed is an exploration direction, not a product label.
 

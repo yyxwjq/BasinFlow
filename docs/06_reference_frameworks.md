@@ -123,6 +123,110 @@ Potential reuse:
 - Sampler structure.
 - Corrector concept.
 
+## React-OT
+
+Local notes and PDFs:
+
+```text
+/Users/wx/Downloads/同步空间/obisidan/zotero/akmcgc-reference
+/Users/wx/Downloads/同步空间/MyZotero/akmcgc
+```
+
+Useful ideas:
+
+- Deterministic or low-variance flow matching for transition-state generation.
+- `R/P -> TS` conditioning through interpolation or optimal-transport-style paths.
+- Replacement of slow stochastic TS sampling with ODE-style generation.
+
+Limitations for this project:
+
+- It assumes the product is already known.
+- It does not solve basin-level discovery of multiple product/event channels from one reactant basin.
+- It is a TS-generation reference, not a full AKMC event-table construction framework.
+
+Potential reuse:
+
+- Stage 4 TS flow design.
+- R/P interpolation initialization.
+- TS coordinate/displacement losses.
+
+## TrajCast
+
+Path:
+
+```text
+/Users/wx/Desktop/yyxwjq/trajcast
+```
+
+Useful ideas:
+
+- Multi-frame ASE trajectory loading.
+- Position and velocity conditioned equivariant prediction.
+- Dynamic graph update during rollout.
+- Force-free learned propagation with physically meaningful vector inputs.
+
+Limitations for this project:
+
+- It targets ordinary trajectory forecasting, not rare-event proposal.
+- Long MD-like rollout is not enough to replace saddle validation.
+
+Potential reuse:
+
+- Pseudo-velocity or event-direction seed encoding.
+- Dynamic PBC graph rebuild patterns.
+- Rollout and sampling engine structure.
+
+## AMDEN
+
+Path:
+
+```text
+/Users/wx/Desktop/yyxwjq/AMDEN-code
+```
+
+Useful ideas:
+
+- Material sample and batch records with lattice and PBC fields.
+- Cached dynamic neighbor-list updates.
+- Generated-sample validation and restart logic.
+- Refinement-aware generation.
+
+Limitations for this project:
+
+- The objective is amorphous/material generation rather than AKMC event discovery.
+- Ghost atoms and inverse-design assumptions are not required for the MVP.
+
+Potential reuse:
+
+- Cached neighbor-list design.
+- Invalid-candidate resampling policies.
+- Future refinement interface ideas.
+
+## EON
+
+Path:
+
+```text
+/Users/wx/Desktop/yyxwjq/eon
+```
+
+Useful ideas:
+
+- Existing AKMC orchestration, saddle search, minimization, barrier, prefactor, and process scheduling.
+- Suggestion-source pattern for generating saddle-search displacements.
+- Search inputs such as position, displacement, and direction files.
+
+Limitations for this project:
+
+- BasinFlow should not call EON during early model training and benchmarking.
+- Direct runtime integration is premature before the proposal model and standalone benchmark exist.
+
+Potential reuse:
+
+- Stage 2 EON-style event data format.
+- Stage 6 EON-side `ml_proposal` interface design.
+- Export artifacts for product guesses, TS/saddle guesses, displacement-like structures, and direction fields.
+
 ## FS-CGP Project Position
 
 This repository is the new clean project that synthesizes selected ideas from the reference frameworks.

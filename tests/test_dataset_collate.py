@@ -33,6 +33,12 @@ def test_pairwise_view_derives_displacement_active_mask_and_event_direction():
     assert item["product"].structure_id == "p0"
     assert item["active_mask"].tolist() == [False, True]
     assert np.allclose(item["event_direction"][1], [1, 0, 0])
+    assert item["fixed_mask"].tolist() == [False, False]
+    assert item["movable_mask"].tolist() == [True, True]
+    assert item["has_transition_state"] is False
+    assert item["transition_state"] is None
+    assert item["ts_displacement"].shape == (2, 3)
+    assert np.allclose(item["ts_displacement"], 0.0)
 
 
 def test_basin_view_preserves_multiple_known_events():
@@ -54,6 +60,10 @@ def test_pairwise_collate_supports_variable_atom_counts_and_keeps_metadata():
     assert batch["basin_ids"] == ["b0", "b1"]
     assert batch["cells"].shape == (2, 3, 3)
     assert batch["pbc"].tolist() == [[False, False, False], [True, True, True]]
+    assert batch["fixed_mask"].tolist() == [False, False, False]
+    assert batch["movable_mask"].tolist() == [True, True, True]
+    assert batch["has_transition_state"].tolist() == [False, False]
+    assert batch["ts_displacements"].shape == (3, 3)
 
 
 def test_basin_collate_supports_variable_known_event_counts():
@@ -66,3 +76,4 @@ def test_basin_collate_supports_variable_known_event_counts():
     assert batch["reactant_batch"].tolist() == [0, 0, 1]
     assert batch["cells"].shape == (2, 3, 3)
     assert batch["pbc"].tolist() == [[False, False, False], [True, True, True]]
+    assert batch["transition_states"] == [[None, None], [None]]

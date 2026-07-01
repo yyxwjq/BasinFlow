@@ -34,48 +34,78 @@ Tests:
 Status: **20 tests passing**.  See `examples/demo_pipeline.py` for an
 end-to-end walkthrough from raw extxyz files to trainable batches.
 
-## Stage 2: Baseline Event Proposal Generator
+## Stage 2: EON-Style Event Dataset Integration
 
 Implement:
 
-- Random local displacement seeds.
-- Active-region perturbation seeds.
-- Simple local-mode or bond-change seeds where available.
-- Relaxation and clustering pipeline.
-- Candidate proposal records with active atoms and event-direction metadata.
+- Import EON-style event folders such as `/Users/wx/Desktop/events`.
+- Parse `basin_table.csv` into basin-level event groups.
+- Read multi-frame `event_*.extxyz` files with:
+  - frame 0 as reactant.
+  - frame 1 as product.
+  - frame 2 as optional transition-state or saddle-like structure.
+- Preserve `move_mask` semantics through fixed-atom masks, plus cell, PBC, event ids, and basin ids. Do not add explicit masses fields in Stage 2; masses remain available through ASE when later physical seed priors need them.
+- Expose pairwise training records and basin-level evaluation records from the same dataset.
+- Derive supervised labels:
+  - active atoms from `move_mask` when present.
+  - fallback active atoms from MIC reactant-product displacement.
+  - product displacement.
+  - event direction.
+  - optional TS displacement / TS structure target.
+- Add deterministic train/validation/test split utilities that split by basin, not by individual event.
 
 Purpose:
 
-- Build the benchmark pipeline before training the neural model.
-- Establish baseline costs and failure modes.
+- Make the existing EON-generated event examples directly usable for neural training and basin-level evaluation.
+- Avoid spending the main development stage on system-specific heuristic proposal rules.
+- Preserve the scientific distinction between pairwise training samples and basin-level event sets.
 
 Tests:
 
-- Candidate records are produced deterministically with fixed random seeds.
-- Relaxed outputs are linked back to generated candidates.
-- Duplicate clustering works on small examples.
-- Active atom and direction metadata are recorded for each proposal.
+- `/Users/wx/Desktop/events`-style table and event files are parsed into the expected number of basins and events.
+- Multi-frame extxyz files preserve reactant, product, and optional TS frames.
+- `move_mask` is converted into active labels.
+- Basin-level view returns multiple events for basins that have multiple events.
+- Splits do not put events from the same basin into different partitions.
+- Derived product displacement and event direction are finite and respect PBC flags.
 
-## Stage 3: Neural Event Proposer MVP
+Non-goal:
+
+- Do not implement random local displacement, hop-like, or site-specific heuristic proposers as the main Stage 2 deliverable. Minimal smoke-test proposers may be added later only if they help test a shared model interface.
+
+## Stage 3: Seed-Conditioned Product/Event Flow
 
 Implement:
 
 - Conditional flow matching model interface.
 - Reactant-conditioned graph encoder.
-- Seed/intermediate-state encoder.
+- `EventSeed` representation with scalar, vector, and initial-geometry roles.
 - Active-atom prediction head.
 - Event-direction or displacement-field head.
 - Dynamic graph update during sampling.
 - Sampling loop with multiple seeds per basin.
+- Product candidate generation from:
+
+```text
+reactant + event seed -> candidate product displacement / coordinates
+```
 
 Training:
 
 - Use pairwise event samples.
-- Train on interpolation or noised states between seed/proposal state and product.
+- Train on interpolation or flow states between a seed-initialized proposal state and the product.
 - Derive active atoms from MIC product displacement.
-- Train the MVP with product-displacement, active-atom, and event-direction losses.
-- Mask TS/barrier/rate targets unless labels are available.
-- Evaluate only on basin-level candidate generation.
+- Prefer `move_mask` active labels when present.
+- Train the MVP with product-displacement flow loss, active-atom loss, and event-direction loss.
+- Treat TS/barrier/rate targets as masked or deferred to Stage 4 unless labels are explicitly available.
+- Evaluate basin-level product/event proposal quality.
+
+Design requirement:
+
+- The event seed must not be only a metadata condition. It must enter as:
+  - node scalar features such as movable mask, fixed mask, active prior, and seed type.
+  - node vector features such as seed direction, pseudo-velocity, and seed displacement.
+  - the flow initial state `x_0 = reactant + seed_displacement`.
 
 Tests:
 
@@ -83,47 +113,83 @@ Tests:
 - Forward pass on periodic batch.
 - Active-atom and direction targets can be derived from toy R/P data.
 - Dynamic graph update changes edges when geometry changes.
-- Sampling produces finite coordinates and valid records.
+- Sampling produces finite product candidates and valid records.
+- Fixed atoms remain fixed or near-fixed when fixed masks are provided.
+- Rotating/translating/permuting a toy system preserves equivariant/invariant behavior.
 
-## Stage 4: Benchmark and Analysis
+## Stage 4: React-OT-Style TS Flow
+
+Implement:
+
+- A transition-state flow model conditioned on reactant and product:
+
+```text
+reactant + product -> transition-state guess
+```
+
+- A deterministic React-OT-style flow path from an R/P interpolation or seeded midpoint to the TS frame.
+- Optional conditioning on the Stage 3 event seed and active atoms.
+- TS heads or output records compatible with later EON `displacement.con` / `direction.dat` generation.
+- Losses for TS coordinate/displacement error and optional direction consistency.
+
+Training:
+
+- Use known product frames from Stage 2 first.
+- Later support generated products from Stage 3 as product conditions.
+- Keep barrier/rate losses masked unless labels are available.
+
+Tests:
+
+- TS flow forward pass works on toy molecule and periodic/event examples.
+- R/P interpolation initialization produces finite TS candidates.
+- Fixed atoms remain fixed or near-fixed when fixed masks are provided.
+- TS loss is masked cleanly for events without TS frames.
+
+## Stage 5: Basin-Level Event Proposal Benchmark
 
 Implement:
 
 - Basin-level benchmark runner.
-- Relaxation integration.
-- Product clustering.
-- Known-event matching.
-- Metrics report.
-- Active-atom precision/recall.
-- Event-direction angular error on active atoms.
+- Multi-seed product and TS candidate generation.
+- Known-event matching against Stage 2 products/TS labels.
+- Metrics report for product, TS, active atom, and direction quality.
+- Optional lightweight relaxation/clustering only when needed for a benchmark, not as a prerequisite to model training.
 
 Outputs:
 
 - Per-basin candidate table.
-- Recall and duplicate metrics.
+- Product and TS candidate table.
+- Event recall and duplicate metrics.
 - Active-region and direction metrics.
-- Cost comparison with baselines.
+- TS coordinate/displacement metrics when TS labels exist.
+- Product-basin recall.
+- Rate-weighted recall when barrier/rate metadata exists.
 - Failure-case structures for inspection.
 
 Exit criteria:
 
-- The model can be compared fairly against non-learning baselines on small systems.
+- The model can be evaluated as a basin-conditioned event proposal model on held-out basins.
+- The benchmark measures whether generated product/TS/direction candidates cover known events, not only one-to-one reconstruction error.
 
-## Stage 5: Saddle Validation Interface
+## Stage 6: EON-Side ML Suggestion Integration
 
 Implement:
 
-- External interface for dimer, NEB, ARTn, or existing AKMC validation tools.
-- Validation job records.
-- Transition-state and barrier metadata.
-- Validated event insertion into event library.
-- Optional use of event direction or TS guess to initialize saddle search.
+- Export model proposals in a format that EON can consume as a new suggestion source.
+- Define candidate conversion to EON-compatible artifacts such as:
+  - product guess.
+  - TS or saddle guess.
+  - displacement-like structure.
+  - direction/mode field.
+- Add or document an EON-side `ml_proposal` source after the standalone training chain is complete.
+- Keep EON AKMC orchestration, saddle refinement, minimization, barriers, prefactors, and runtime scheduling inside EON.
 
 Exit criteria:
 
-- Candidate products can be promoted to validated KMC events through a reproducible workflow.
+- EON can consume BasinFlow-generated event proposals as saddle-search suggestions.
+- BasinFlow does not need to call EON during model training.
 
-## Stage 6: Adaptive KMC Integration
+## Stage 7: Event Library and Adaptive KMC Extensions
 
 Implement:
 
@@ -145,4 +211,5 @@ Exit criteria:
 3. ~~Define the package layout.~~ → `src/fscgp/{data,geometry,graphs}`.
 4. ~~Implement schema and I/O tests.~~ → 20 tests passing.
 5. Add geometry invariance tests (translation, rotation, permutation) before Stage 3.
-6. Implement baseline event proposal generation (Stage 2).
+6. Implement Stage 2 EON-style event dataset integration for `/Users/wx/Desktop/events`.
+7. Define `EventSeed` and seed-derived product-flow training targets.

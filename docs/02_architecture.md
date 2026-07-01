@@ -2,7 +2,7 @@
 
 ## Recommended Model Direction
 
-The recommended generator is a conditional flow matching or rectified-flow event proposer over atomic displacements, active-region scores, and candidate product coordinates.
+The recommended generator is a seed-conditioned flow-matching event proposer over atomic displacements, active-region scores, candidate product coordinates, and optional transition-state coordinates.
 
 Reasons:
 
@@ -10,9 +10,10 @@ Reasons:
 - It is easier to condition on reactant geometry, local environment, and event seed than a pure denoising diffusion objective.
 - It fits the idea of using different seeds to generate different exploration directions.
 - It can be paired with a denoising or force-like corrector.
-- It can expose interpretable proposal heads for active atoms and event direction before adding harder TS or barrier targets.
+- It can expose interpretable proposal heads for active atoms and event direction.
+- It can use a React-OT-style conditional flow for transition-state generation once a product candidate is known.
 
-The framework should keep the model interface generic enough to support diffusion models later, but the first implementation should prioritize conditional flow matching.
+The framework should keep the model interface generic enough to support diffusion models later, but the first implementation should prioritize deterministic or low-variance conditional flow matching rather than OA-ReactDiff-style multi-sample stochastic diffusion.
 
 ## High-Level Pipeline
 
@@ -20,7 +21,8 @@ The framework should keep the model interface generic enough to support diffusio
 EventDataset
   -> BasinSampler
   -> SeedGenerator
-  -> EventProposer
+  -> ProductEventFlow
+  -> TSFlow
   -> DynamicPBCGraphBuilder
   -> CandidateSampler
   -> RelaxationRunner
@@ -39,27 +41,52 @@ Loads basin-level and pairwise event samples. It should expose both:
 - Pair records for training.
 - Basin records for validation and sampling.
 
-### SeedGenerator
+The first concrete dataset direction is an EON-style event table plus multi-frame event files:
 
-Produces initial proposal states or perturbation directions. The seed is not the answer. It is a mechanism for diversity. In FS-CGP, a seed should be interpreted as a proposed exploration direction or pseudo-dynamical perturbation, not as a hidden product label.
+```text
+basin_table.csv
+event_*.extxyz
+```
+
+Each event file should preserve reactant, product, and optional transition-state frames. Active labels should use `move_mask` when present, with MIC displacement-derived labels as a fallback.
+
+### EventSeed and SeedGenerator
+
+Produces initial proposal states or perturbation directions. The seed is not the answer. It is a mechanism for diversity. In BasinFlow, a seed should be interpreted as a proposed exploration direction or pseudo-dynamical perturbation, not as a hidden product label.
 
 Seed types can include:
 
-- Gaussian displacement seeds.
+- Movable-atom or active-atom masks.
+- Direction or pseudo-velocity fields.
+- Product-displacement priors.
 - Local-mode perturbations.
-- Bond-change proposals.
 - Adsorbate/local-environment perturbations.
 - Previous event-library motifs.
 
-### EventProposer
+An event seed should enter the model in three forms:
+
+```text
+node scalar condition:
+  active_prior, movable_mask, fixed_mask, seed_type, local scores
+
+node vector condition:
+  seed_direction, seed_displacement, pseudo_velocity
+
+flow initial geometry:
+  x_0 = reactant + seed_displacement
+```
+
+This design follows the lessons from LiFlow and TrajCast: a physical seed should be a geometric state or equivariant vector condition, not just metadata appended to scalar node features.
+
+### ProductEventFlow
 
 Maps:
 
 ```text
-reactant structure, seed state, time/noise level, optional event condition -> velocity or score
+reactant structure, seed state, flow time, optional event condition -> product velocity or score
 ```
 
-The output is integrated or iteratively denoised into candidate product coordinates.
+The output is integrated into candidate product coordinates.
 
 The first MVP outputs:
 
@@ -67,9 +94,23 @@ The first MVP outputs:
 - event displacement or direction field
 - candidate product displacement or coordinates
 
+### TSFlow
+
+Maps:
+
+```text
+reactant structure, product structure, optional event seed, flow time -> TS velocity or score
+```
+
+This component should follow the React-OT lesson: when both reactant and product are available, transition-state generation should use a deterministic or low-variance R/P-conditioned flow path, such as interpolation from R/P to the TS target.
+
+The first TS MVP outputs:
+
+- transition-state displacement or coordinates.
+- optional mode/direction field useful for saddle refinement.
+
 Later heads may output:
 
-- transition-state guess
 - barrier or log-rate estimate
 - uncertainty or validation-priority score
 
@@ -137,7 +178,7 @@ Exports validated events into a rate-table format usable by downstream KMC code.
 Training flow:
 
 ```text
-basin/event records -> pair sampler -> derived active/direction labels -> noised/interpolated state -> event-proposer loss
+basin/event records -> pair sampler -> event seed + derived active/direction labels -> flow state -> product-event-flow loss
 ```
 
 The first training objective should be simple and robust:
@@ -146,19 +187,29 @@ The first training objective should be simple and robust:
 L = L_product_displacement + lambda_active L_active + lambda_direction L_direction
 ```
 
-All three targets can be derived from reactant/product pairs. TS, barrier, rate, and priority losses are masked unless labels or validators are available.
+All three targets can be derived from reactant/product pairs, with `move_mask` preferred for active labels when present.
+
+TS training flow:
+
+```text
+reactant/product/TS records -> R/P interpolation or seeded midpoint -> TS flow loss
+```
+
+TS targets are used only when TS or saddle-like frames are present. Barrier, rate, and priority losses are masked unless labels or validators are available.
 
 Evaluation flow:
 
 ```text
-held-out basin -> many seeds -> generated candidates -> relaxation -> clustering -> recall/cost metrics
+held-out basin -> many seeds -> generated products + TS guesses -> matching/optional relaxation -> recall/cost metrics
 ```
 
 Adaptive KMC flow:
 
 ```text
-current state -> library lookup -> model proposals -> cheap filtering -> selective saddle validation -> event table update
+current state in EON -> optional library lookup -> BasinFlow model proposals -> EON saddle refinement/validation -> event table update
 ```
+
+BasinFlow should not call EON during early model training. The intended integration is later EON-side support for an `ml_proposal` suggestion source that consumes BasinFlow product/TS/direction candidates.
 
 ## Why This Architecture
 

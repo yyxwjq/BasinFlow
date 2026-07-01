@@ -30,7 +30,7 @@ class StructureRecord:
     positions: np.ndarray
     cell: np.ndarray | None = None
     pbc: np.ndarray | None = None
-    charge: int | None = None
+    charge: int | None = None       # user-populated; not auto-extracted by from_ase()
     constraints: np.ndarray | None = None
     tags: np.ndarray | None = None
     energy: float | None = None
@@ -100,11 +100,13 @@ class StructureRecord:
         if self.tags is not None:
             atoms.set_tags(self.tags)
         if self.constraints is not None and self.constraints.any():
+            # Lazy import — FixAtoms is only needed for ASE export, not at module load.
             from ase.constraints import FixAtoms
 
             fixed_indices = np.where(self.constraints)[0]
             atoms.set_constraint(FixAtoms(indices=fixed_indices))
-        atoms.info.update(self.metadata)
+        # Copy to avoid mutating self.metadata when ASE later modifies atoms.info.
+        atoms.info.update(dict(self.metadata))
 
         calc_kwargs: dict[str, Any] = {}
         if self.energy is not None:

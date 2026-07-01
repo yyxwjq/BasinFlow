@@ -112,16 +112,25 @@ def read_event_files(
     return loaded
 
 
-def _read_basin_table(csv_path: Path) -> dict[str, str]:
-    """Read a ``basin_table.csv`` → ``{filename: basin_id}`` mapping."""
-    mapping: dict[str, str] = {}
+def _read_basin_table(csv_path: Path) -> list[dict[str, str]]:
+    """Read ``basin_table.csv`` rows in file order."""
+    rows: list[dict[str, str]] = []
     with csv_path.open("r", newline="") as f:
-        for row in csv.DictReader(f):
+        reader = csv.DictReader(f)
+        missing = {"file", "basin"} - set(reader.fieldnames or [])
+        if missing:
+            raise ValueError(
+                f"basin table {csv_path} is missing columns: {sorted(missing)}"
+            )
+        for row in reader:
             fname = (row.get("file") or "").strip()
             basin = (row.get("basin") or "").strip()
-            if fname and basin:
-                mapping[fname] = basin
-    return mapping
+            if not fname or not basin:
+                raise ValueError(
+                    f"basin table {csv_path} has row without file/basin: {row}"
+                )
+            rows.append({k: (v or "").strip() for k, v in row.items()})
+    return rows
 
 
 def read_events_directory(
@@ -153,13 +162,13 @@ def read_events_directory(
         raise FileNotFoundError(f"events directory not found: {events_dir}")
 
     # Resolve basin mapping
-    basin_map: dict[str, str] = {}
+    basin_rows: list[dict[str, str]] = []
     if basin_table is None:
         default_table = events_dir / "basin_table.csv"
         if default_table.is_file():
             basin_table = default_table
     if basin_table is not None:
-        basin_map = _read_basin_table(Path(basin_table))
+        basin_rows = _read_basin_table(Path(basin_table))
 
     # Find event files
     event_files = sorted(events_dir.glob(glob_pattern))
@@ -168,25 +177,31 @@ def read_events_directory(
             f"no event files matching {glob_pattern!r} in {events_dir}"
         )
 
-    # Load each event
+    if basin_rows:
+        path_by_name = {path.name: path for path in event_files}
+        missing_files = [
+            row["file"] for row in basin_rows if row["file"] not in path_by_name
+        ]
+        if missing_files:
+            raise FileNotFoundError(
+                f"basin table references missing event files: {missing_files}"
+            )
+        load_specs = [
+            (path_by_name[row["file"]], row["basin"], row)
+            for row in basin_rows
+        ]
+    else:
+        load_specs = [(path, None, {}) for path in event_files]
+
     loaded_events: list[LoadedEvent] = []
-    for path in event_files:
-        basin_id = basin_map.get(path.name)
-        if basin_id is None and basin_map:
-            print(f"  ⚠ {path.name}: not listed in basin table")
+    for path, basin_id, row_metadata in load_specs:
         loaded = read_event_file(
             path,
             basin_id=basin_id,
             event_id=path.stem,
+            metadata=row_metadata,
             **kwargs,
         )
         loaded_events.append(loaded)
-
-    # Check for entries in basin_table with no matching file
-    if basin_map:
-        on_disk = {p.name for p in event_files}
-        for fname in basin_map:
-            if fname not in on_disk:
-                print(f"  ⚠ basin table references missing file: {fname}")
 
     return EventDataset.from_loaded_events(loaded_events)
