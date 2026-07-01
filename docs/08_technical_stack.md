@@ -10,6 +10,7 @@ The first goal is a reproducible research codebase for molecular and periodic en
 
 Recommended:
 
+- Default local conda environment: `ifdiff` (`conda activate ifdiff`).
 - Python 3.10 or 3.11.
 - PyTorch as the main tensor and model framework.
 - PyTorch Geometric or a compatible graph batching layer.
@@ -153,16 +154,16 @@ Each module should have a narrow responsibility. The generator should not own da
 
 Start with a minimal dependency set:
 
-- `torch`
 - `numpy`
-- `scipy`
 - `ase`
 - `pyyaml`
 - `pytest`
 
 Add graph and materials dependencies explicitly when the corresponding module is implemented:
 
+- `torch`
 - `torch-geometric`
+- `scipy`
 - `pymatgen`
 - `spglib`
 - `e3nn`

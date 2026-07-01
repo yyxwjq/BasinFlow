@@ -20,9 +20,10 @@ class StructureRecord:
     arrays.  Periodic behavior must be decided from ``pbc``, not from the
     presence of a nonzero cell.
 
-    ``constraints`` is a per-atom boolean mask where ``True`` marks atoms
-    that are fixed (e.g. a structural skeleton).  Only unconstrained atoms
-    should be displaced during generation or relaxation.
+    ``movable_mask`` is a per-atom boolean mask where ``True`` marks atoms
+    that may be displaced during generation or relaxation.  Legacy
+    ``constraints`` input is still accepted as ``True`` = fixed and converted
+    to ``movable_mask``.
     """
 
     structure_id: str
@@ -31,6 +32,7 @@ class StructureRecord:
     cell: np.ndarray | None = None
     pbc: np.ndarray | None = None
     charge: int | None = None       # user-populated; not auto-extracted by from_ase()
+    movable_mask: np.ndarray | None = None
     constraints: np.ndarray | None = None
     tags: np.ndarray | None = None
     energy: float | None = None
@@ -60,13 +62,30 @@ class StructureRecord:
                     f"tags must have shape ({self.n_atoms},), "
                     f"got {self.tags.shape}"
                 )
+        if self.movable_mask is not None:
+            self.movable_mask = np.asarray(self.movable_mask, dtype=bool)
+            if self.movable_mask.shape != (self.n_atoms,):
+                raise ValueError(
+                    f"movable_mask must have shape ({self.n_atoms},), "
+                    f"got {self.movable_mask.shape}"
+                )
         if self.constraints is not None:
-            self.constraints = np.asarray(self.constraints, dtype=bool)
-            if self.constraints.shape != (self.n_atoms,):
+            legacy_constraints = np.asarray(self.constraints, dtype=bool)
+            if legacy_constraints.shape != (self.n_atoms,):
                 raise ValueError(
                     f"constraints must have shape ({self.n_atoms},), "
-                    f"got {self.constraints.shape}"
+                    f"got {legacy_constraints.shape}"
                 )
+            legacy_movable = ~legacy_constraints
+            if self.movable_mask is not None and not np.array_equal(
+                self.movable_mask,
+                legacy_movable,
+            ):
+                raise ValueError("movable_mask must equal ~constraints when both are provided")
+            self.movable_mask = legacy_movable
+        if self.movable_mask is None:
+            self.movable_mask = np.ones((self.n_atoms,), dtype=bool)
+        self.constraints = ~self.movable_mask
         if self.forces is not None:
             self.forces = np.asarray(self.forces, dtype=float)
             if self.forces.shape != self.positions.shape:
@@ -99,11 +118,12 @@ class StructureRecord:
         )
         if self.tags is not None:
             atoms.set_tags(self.tags)
-        if self.constraints is not None and self.constraints.any():
+        fixed_mask = ~np.asarray(self.movable_mask, dtype=bool)
+        if fixed_mask.any():
             # Lazy import — FixAtoms is only needed for ASE export, not at module load.
             from ase.constraints import FixAtoms
 
-            fixed_indices = np.where(self.constraints)[0]
+            fixed_indices = np.where(fixed_mask)[0]
             atoms.set_constraint(FixAtoms(indices=fixed_indices))
         # Copy to avoid mutating self.metadata when ASE later modifies atoms.info.
         atoms.info.update(dict(self.metadata))
@@ -127,9 +147,9 @@ class StructureRecord:
         """Create a `StructureRecord` from an ASE `Atoms` object.
 
         Energy and forces are read from the attached calculator when
-        available.  ASE ``FixAtoms`` constraints are converted to a
-        per-atom boolean mask (``True`` = atom is fixed).
-        ``tags`` are preserved when present.
+        available.  ``move_mask`` arrays are treated as ``True`` = movable.
+        ASE ``FixAtoms`` constraints are used as a fallback and converted to
+        ``movable_mask``. ``tags`` are preserved when present.
         """
         merged_metadata = dict(metadata or {})
         merged_metadata.update(atoms.info)
@@ -148,15 +168,23 @@ class StructureRecord:
 
         tags = atoms.get_tags() if "tags" in atoms.arrays else None
 
-        # Convert ASE FixAtoms constraints to a per-atom boolean mask
-        constraints: np.ndarray | None = None
+        movable_mask: np.ndarray | None = None
+        if "move_mask" in atoms.arrays:
+            movable_mask = np.asarray(atoms.arrays["move_mask"], dtype=bool)
+
+        # Convert ASE FixAtoms constraints to a movable per-atom boolean mask
         if atoms.constraints:
             fixed = np.zeros(len(atoms), dtype=bool)
             for c in atoms.constraints:
                 if hasattr(c, "get_indices"):
                     fixed[c.get_indices()] = True
-            if fixed.any():
-                constraints = fixed
+            constraint_movable = ~fixed
+            if movable_mask is not None and not np.array_equal(
+                movable_mask,
+                constraint_movable,
+            ):
+                raise ValueError("move_mask and FixAtoms constraints disagree")
+            movable_mask = constraint_movable
 
         return cls(
             structure_id=structure_id,
@@ -165,7 +193,7 @@ class StructureRecord:
             cell=atoms.get_cell().array,
             pbc=atoms.get_pbc(),
             tags=tags,
-            constraints=constraints,
+            movable_mask=movable_mask,
             energy=energy,
             forces=forces,
             metadata=merged_metadata,

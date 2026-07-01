@@ -21,7 +21,7 @@ positions: float[N, 3]
 cell: float[3, 3] | null      # always normalized to (3,3); null → zero matrix
 pbc: bool[3]                   # always normalized to (3,)
 charge: int | null
-constraints: bool[N] | null    # True = atom is fixed (structural skeleton)
+movable_mask: bool[N] | null   # True = atom may move; null → all atoms movable
 tags: int[N] | null
 energy: float | null
 forces: float[N, 3] | null
@@ -32,10 +32,15 @@ Rules:
 
 - `cell` and `pbc` are **normalized on construction**: `cell` is always
   a `(3, 3)` float array, `pbc` is always a `(3,)` bool array.
-- `constraints` is a **per-atom boolean mask** where `True` marks atoms
-  that are fixed (e.g. a bulk skeleton).  Only unconstrained atoms are
-  displaced during generation.  When read from extxyz, ASE `FixAtoms`
-  objects are automatically converted to this mask.
+- `movable_mask` is the **canonical per-atom movement mask** where
+  `True` marks atoms that may be displaced during generation, training,
+  and relaxation.  Missing masks default to all atoms movable.
+- Raw `move_mask` properties are treated as `True = movable` and are
+  converted to `movable_mask` when reading ASE structures.  ASE
+  `FixAtoms` constraints and legacy `constraints` inputs are accepted as
+  compatibility paths and converted to `movable_mask` (`False` for fixed
+  atoms).  Core APIs should not expose a separate `fixed_mask`; use
+  `~movable_mask` when fixed atoms are needed locally.
 - `source_file` is stored in `metadata["source_file"]`, not as a
   top-level field.
 - `spin` is deferred to `metadata` for future use.
@@ -160,8 +165,10 @@ One multi-frame ASE extxyz file per event:
 The three-frame model is the only supported format for the MVP.
 Path images are not stored in event files.
 
-Extxyz comment-line properties such as `move_mask` are parsed
-automatically by ASE and converted to `StructureRecord.constraints`.
+Extxyz atom properties such as `move_mask` are parsed by ASE and
+converted to `StructureRecord.movable_mask`.  ASE trajectory files
+(`*.traj`) are preferred when exact `FixAtoms` constraint round-trip is
+required.
 
 ### Basin table (`basin_table.csv`)
 
@@ -226,8 +233,8 @@ Batching handles:
 - Different atom counts (concatenated along atom axis).
 - Different numbers of events per basin (kept as lists).
 - Optional periodic cell / pbc fields (stacked per structure).
-- `constraints` masks are **not** batched automatically — the model
-  receives them per-structure.
+- `movable_mask` is batched as an atom-level boolean array.  Fixed atoms
+  are represented by `~movable_mask`.
 
 The collated output is a plain `dict[str, ...]` of NumPy arrays and
 lists, ready for conversion to PyTorch tensors or PyG `Data` objects.

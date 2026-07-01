@@ -44,6 +44,11 @@ def _batch_index(records: Sequence[StructureRecord]) -> np.ndarray:
     )
 
 
+def _ptr(records: Sequence[StructureRecord]) -> np.ndarray:
+    counts = [record.n_atoms for record in records]
+    return np.asarray([0, *np.cumsum(counts, dtype=np.int64)], dtype=np.int64)
+
+
 def collate_pairwise(items: list[dict[str, Any]]) -> dict[str, Any]:
     """Collate variable-size pairwise event items without dropping metadata."""
     reactants = [item["reactant"] for item in items]
@@ -60,7 +65,6 @@ def collate_pairwise(items: list[dict[str, Any]]) -> dict[str, Any]:
         "displacements": _concat_field(items, "displacement", float, ndim=2),
         "ts_displacements": _concat_field(items, "ts_displacement", float, ndim=2),
         "active_mask": _concat_field(items, "active_mask", bool),
-        "fixed_mask": _concat_field(items, "fixed_mask", bool),
         "movable_mask": _concat_field(items, "movable_mask", bool),
         "event_direction": _concat_field(items, "event_direction", float, ndim=2),
         # --- per-sample fields ---
@@ -70,6 +74,8 @@ def collate_pairwise(items: list[dict[str, Any]]) -> dict[str, Any]:
         # --- structure-level fields ---
         "reactant_batch": _batch_index(reactants),
         "product_batch": _batch_index(products),
+        "reactant_ptr": _ptr(reactants),
+        "product_ptr": _ptr(products),
         "cells": np.stack([record.cell for record in reactants], axis=0)
         if reactants
         else np.zeros((0, 3, 3), dtype=float),
@@ -80,6 +86,48 @@ def collate_pairwise(items: list[dict[str, Any]]) -> dict[str, Any]:
         "atom_mappings": [item["atom_mapping"] for item in items],
         "metadata": [item["metadata"] for item in items],
     }
+
+
+def pairwise_batch_to_pyg_data(batch: dict[str, Any]):
+    """Convert a collated pairwise batch to a PyG `Data` object.
+
+    PyTorch and PyTorch Geometric are optional model dependencies.  The core
+    data package remains importable without them; this bridge imports both only
+    when called.
+    """
+    try:
+        import torch
+        from torch_geometric.data import Data
+    except ImportError as exc:
+        raise ImportError(
+            "pairwise_batch_to_pyg_data requires optional model dependencies: "
+            "install torch and torch-geometric"
+        ) from exc
+
+    n_atoms = int(batch["reactant_positions"].shape[0])
+    edge_index = batch.get("edge_index")
+    if edge_index is None:
+        edge_index = np.zeros((2, 0), dtype=np.int64)
+    cell_offsets = batch.get("cell_offsets")
+    if cell_offsets is None:
+        cell_offsets = np.zeros((0, 3), dtype=np.int64)
+
+    return Data(
+        atomic_numbers=torch.as_tensor(batch["atomic_numbers"], dtype=torch.long),
+        pos=torch.as_tensor(batch["reactant_positions"], dtype=torch.float32),
+        product_pos=torch.as_tensor(batch["product_positions"], dtype=torch.float32),
+        displacement=torch.as_tensor(batch["displacements"], dtype=torch.float32),
+        ts_displacement=torch.as_tensor(batch["ts_displacements"], dtype=torch.float32),
+        active_mask=torch.as_tensor(batch["active_mask"], dtype=torch.bool),
+        movable_mask=torch.as_tensor(batch["movable_mask"], dtype=torch.bool),
+        batch=torch.as_tensor(batch["reactant_batch"], dtype=torch.long),
+        ptr=torch.as_tensor(batch["reactant_ptr"], dtype=torch.long),
+        cell=torch.as_tensor(batch["cells"], dtype=torch.float32),
+        pbc=torch.as_tensor(batch["pbc"], dtype=torch.bool),
+        edge_index=torch.as_tensor(edge_index, dtype=torch.long),
+        cell_offsets=torch.as_tensor(cell_offsets, dtype=torch.long),
+        num_nodes=n_atoms,
+    )
 
 
 def collate_basins(items: list[dict[str, Any]]) -> dict[str, Any]:

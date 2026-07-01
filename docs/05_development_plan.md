@@ -31,10 +31,10 @@ Tests:
 - Different numbers of events per basin.
 - PBC minimum-image distance and cell-offset edge construction.
 
-Status: **20 tests passing**.  See `examples/demo_pipeline.py` for an
-end-to-end walkthrough from raw extxyz files to trainable batches.
+Status: complete.  See `examples/demo_pipeline.py` for an end-to-end
+walkthrough from raw extxyz files to trainable batches.
 
-## Stage 2: EON-Style Event Dataset Integration
+## Stage 2: EON-Style Event Dataset Integration  ✅ CORE COMPLETE
 
 Implement:
 
@@ -44,7 +44,7 @@ Implement:
   - frame 0 as reactant.
   - frame 1 as product.
   - frame 2 as optional transition-state or saddle-like structure.
-- Preserve `move_mask` semantics through fixed-atom masks, plus cell, PBC, event ids, and basin ids. Do not add explicit masses fields in Stage 2; masses remain available through ASE when later physical seed priors need them.
+- Preserve `move_mask` semantics through canonical `movable_mask`, plus cell, PBC, event ids, and basin ids. Do not add explicit masses fields in Stage 2; masses remain available through ASE when later physical seed priors need them.
 - Expose pairwise training records and basin-level evaluation records from the same dataset.
 - Derive supervised labels:
   - active atoms from `move_mask` when present.
@@ -72,6 +72,21 @@ Tests:
 Non-goal:
 
 - Do not implement random local displacement, hop-like, or site-specific heuristic proposers as the main Stage 2 deliverable. Minimal smoke-test proposers may be added later only if they help test a shared model interface.
+
+## Stage 2.5: Seed and Product-Flow Target Contract  ✅ PROTOTYPE COMPLETE
+
+Implemented:
+
+- `EventSeed` with scalar/vector/initial-geometry roles.
+- Seed generators for zero, Gaussian movable, and product-displacement seeds.
+- Product-flow target construction for straight-line conditional flow matching.
+- Dummy product-event flow and masked velocity loss for interface smoke tests.
+
+Status:
+
+- The data and contract layer is available for Stage 3.
+- A trainable EGNN/PaiNN-style backbone, sampling loop, and benchmark runner
+  are still Stage 3+ work.
 
 ## Stage 3: Seed-Conditioned Product/Event Flow
 
@@ -103,7 +118,7 @@ Training:
 Design requirement:
 
 - The event seed must not be only a metadata condition. It must enter as:
-  - node scalar features such as movable mask, fixed mask, active prior, and seed type.
+  - node scalar features such as movable mask, active prior, and seed type.
   - node vector features such as seed direction, pseudo-velocity, and seed displacement.
   - the flow initial state `x_0 = reactant + seed_displacement`.
 
@@ -209,7 +224,10 @@ Exit criteria:
 1. ~~Choose the first molecule benchmark dataset.~~ → Au₁₀₁ cluster (periodic, 12 basins).
 2. ~~Choose the first periodic benchmark dataset.~~ → same Au system, PBC-aware.
 3. ~~Define the package layout.~~ → `src/fscgp/{data,geometry,graphs}`.
-4. ~~Implement schema and I/O tests.~~ → 20 tests passing.
-5. Add geometry invariance tests (translation, rotation, permutation) before Stage 3.
-6. Implement Stage 2 EON-style event dataset integration for `/Users/wx/Desktop/events`.
-7. Define `EventSeed` and seed-derived product-flow training targets.
+4. ~~Implement schema and I/O tests.~~ → core tests passing.
+5. ~~Add geometry invariance tests (translation, rotation, permutation) before Stage 3.~~
+6. ~~Implement Stage 2 EON-style event dataset integration for `/Users/wx/Desktop/events`.~~
+7. ~~Define `EventSeed` and seed-derived product-flow training targets.~~
+8. Implement the trainable Stage 3 product-event flow backbone and training loop.
+9. Add the basin-level mini benchmark before full TS-flow work.
+10. Select and ingest a second benchmark dataset with multi-atom or multi-element events.

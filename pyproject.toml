@@ -12,6 +12,13 @@ dependencies = [
   "numpy",
 ]
 
+[project.optional-dependencies]
+models = [
+  "scipy",
+  "torch",
+  "torch-geometric",
+]
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

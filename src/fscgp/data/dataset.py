@@ -13,26 +13,20 @@ from fscgp.geometry.mic import (
 )
 
 
-def _derive_active_atoms_from_constraints(
+def _derive_active_atoms_from_movable_mask(
     structure: StructureRecord,
 ) -> list[int] | None:
-    """Return movable atom indices from a per-atom constraint mask.
+    """Return movable atom indices when an explicit movable subset exists.
 
     Returns ``None`` when no constraint information is available,
     allowing downstream code to fall back to MIC-derived labels.
     """
-    if structure.constraints is None:
+    if structure.movable_mask is None or np.all(structure.movable_mask):
         return None
-    movable = ~structure.constraints
+    movable = np.asarray(structure.movable_mask, dtype=bool)
     if not movable.any():
         return []
     return [int(i) for i in movable.nonzero()[0]]
-
-
-def _fixed_mask(structure: StructureRecord) -> np.ndarray:
-    if structure.constraints is None:
-        return np.zeros((structure.n_atoms,), dtype=bool)
-    return np.asarray(structure.constraints, dtype=bool)
 
 
 def _active_mask_from_event(
@@ -129,8 +123,7 @@ class EventDataset:
                 threshold=active_threshold,
             )
         direction = derive_event_direction(displacement, active_mask=active_mask)
-        fixed_mask = _fixed_mask(reactant)
-        movable_mask = ~fixed_mask
+        movable_mask = np.asarray(reactant.movable_mask, dtype=bool)
         transition_state, ts_displacement = _ts_item(self, event, reactant)
 
         return {
@@ -144,7 +137,6 @@ class EventDataset:
             "displacement": displacement,
             "ts_displacement": ts_displacement,
             "active_mask": active_mask,
-            "fixed_mask": fixed_mask,
             "movable_mask": movable_mask,
             "event_direction": direction,
             "atom_mapping": event.atom_mapping,
@@ -190,7 +182,7 @@ class EventDataset:
 
             event = loaded.event
             if event.active_atoms is None:
-                active = _derive_active_atoms_from_constraints(loaded.reactant)
+                active = _derive_active_atoms_from_movable_mask(loaded.reactant)
                 if active is not None:
                     event.active_atoms = active
             events[event.event_id] = event

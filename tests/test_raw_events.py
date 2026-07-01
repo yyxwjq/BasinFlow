@@ -9,6 +9,7 @@ import pytest
 
 from fscgp.data.raw_events import read_event_file, read_events_directory
 from fscgp.data.dataset import split_basins
+from fscgp.data.records import StructureRecord
 
 
 def test_two_frame_event_file_loads_reactant_and_product(tmp_path):
@@ -142,8 +143,17 @@ def test_events_directory_loads_in_basin_table_order_and_preserves_metadata(tmp_
     assert dataset.events["event_2"].metadata["file"] == "event_2.extxyz"
 
 
-def test_read_event_file_derives_active_atoms_from_fixatoms_constraints(tmp_path):
-    path = tmp_path / "event_0.extxyz"
+def test_structure_record_converts_fixatoms_to_movable_mask():
+    atoms = Atoms("Au3", positions=[[0, 0, 0], [1, 0, 0], [2, 0, 0]], cell=np.eye(3) * 10, pbc=False)
+    atoms.set_constraint(FixAtoms(indices=[0, 2]))
+
+    record = StructureRecord.from_ase(atoms, structure_id="r")
+
+    assert record.movable_mask.tolist() == [False, True, False]
+
+
+def test_read_event_file_derives_active_atoms_from_traj_fixatoms(tmp_path):
+    path = tmp_path / "event_0.traj"
     frames = [
         Atoms("Au3", positions=[[0, 0, 0], [1, 0, 0], [2, 0, 0]], cell=np.eye(3) * 10, pbc=False),
         Atoms("Au3", positions=[[0, 0, 0], [1, 0.2, 0], [2, 0, 0]], cell=np.eye(3) * 10, pbc=False),
@@ -153,13 +163,44 @@ def test_read_event_file_derives_active_atoms_from_fixatoms_constraints(tmp_path
         atoms.set_constraint(FixAtoms(indices=[0, 2]))
     write(path, frames)
 
+    loaded = read_event_file(path, event_id="event_0", basin_id="b0")
+    dataset = read_events_directory(tmp_path, glob_pattern="event_*.traj")
+    item = dataset.pairwise_item("event_0", active_threshold=1.0)
+
+    assert loaded.reactant.movable_mask.tolist() == [False, True, False]
+    assert dataset.events["event_0"].active_atoms == [1]
+    assert item["movable_mask"].tolist() == [False, True, False]
+    assert (~item["movable_mask"]).tolist() == [True, False, True]
+
+
+def test_read_event_file_derives_active_atoms_from_move_mask(tmp_path):
+    path = tmp_path / "event_0.extxyz"
+    path.write_text(
+        """3
+Lattice="10.0 0.0 0.0 0.0 10.0 0.0 0.0 0.0 10.0" Properties=species:S:1:pos:R:3:move_mask:L:1 pbc="F F F"
+Au 0.0 0.0 0.0 F
+Au 1.0 0.0 0.0 T
+Au 2.0 0.0 0.0 F
+3
+Lattice="10.0 0.0 0.0 0.0 10.0 0.0 0.0 0.0 10.0" Properties=species:S:1:pos:R:3:move_mask:L:1 pbc="F F F"
+Au 0.0 0.0 0.0 F
+Au 1.0 0.2 0.0 T
+Au 2.0 0.0 0.0 F
+3
+Lattice="10.0 0.0 0.0 0.0 10.0 0.0 0.0 0.0 10.0" Properties=species:S:1:pos:R:3:move_mask:L:1 pbc="F F F"
+Au 0.0 0.0 0.0 F
+Au 1.0 0.1 0.0 T
+Au 2.0 0.0 0.0 F
+"""
+    )
+
     dataset = read_events_directory(tmp_path)
     item = dataset.pairwise_item("event_0", active_threshold=1.0)
 
     assert dataset.events["event_0"].active_atoms == [1]
     assert item["active_mask"].tolist() == [False, True, False]
-    assert item["fixed_mask"].tolist() == [True, False, True]
     assert item["movable_mask"].tolist() == [False, True, False]
+    assert (~item["movable_mask"]).tolist() == [True, False, True]
     assert item["has_transition_state"] is True
     assert item["transition_state"].structure_id == "event_0:transition_state"
     assert np.allclose(item["ts_displacement"][1], [0, 0.1, 0])
@@ -180,7 +221,6 @@ def test_pairwise_item_falls_back_to_displacement_active_atoms_without_constrain
 
     assert dataset.events["event_0"].active_atoms is None
     assert item["active_mask"].tolist() == [False, True]
-    assert item["fixed_mask"].tolist() == [False, False]
     assert item["movable_mask"].tolist() == [True, True]
 
 
@@ -232,7 +272,7 @@ def test_stage2_real_events_dataset_when_env_is_set():
         assert item["product"].n_atoms == 101
         assert item["has_transition_state"] is True
         assert item["movable_mask"].sum() == 1
-        assert item["fixed_mask"].sum() == 100
+        assert (~item["movable_mask"]).sum() == 100
         assert item["active_mask"].sum() == 1
 
     train, val, test = split_basins(dataset, train=0.7, val=0.15, test=0.15, seed=42)

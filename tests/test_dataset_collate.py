@@ -1,6 +1,8 @@
 import numpy as np
 
-from fscgp.data.collate import collate_basins, collate_pairwise
+import pytest
+
+from fscgp.data.collate import collate_basins, collate_pairwise, pairwise_batch_to_pyg_data
 from fscgp.data.dataset import EventDataset
 from fscgp.data.records import BasinRecord, EventRecord, StructureRecord
 
@@ -33,7 +35,6 @@ def test_pairwise_view_derives_displacement_active_mask_and_event_direction():
     assert item["product"].structure_id == "p0"
     assert item["active_mask"].tolist() == [False, True]
     assert np.allclose(item["event_direction"][1], [1, 0, 0])
-    assert item["fixed_mask"].tolist() == [False, False]
     assert item["movable_mask"].tolist() == [True, True]
     assert item["has_transition_state"] is False
     assert item["transition_state"] is None
@@ -56,11 +57,12 @@ def test_pairwise_collate_supports_variable_atom_counts_and_keeps_metadata():
     assert batch["reactant_positions"].shape == (3, 3)
     assert batch["product_positions"].shape == (3, 3)
     assert batch["reactant_batch"].tolist() == [0, 0, 1]
+    assert batch["reactant_ptr"].tolist() == [0, 2, 3]
+    assert batch["product_ptr"].tolist() == [0, 2, 3]
     assert batch["event_ids"] == ["e0", "e2"]
     assert batch["basin_ids"] == ["b0", "b1"]
     assert batch["cells"].shape == (2, 3, 3)
     assert batch["pbc"].tolist() == [[False, False, False], [True, True, True]]
-    assert batch["fixed_mask"].tolist() == [False, False, False]
     assert batch["movable_mask"].tolist() == [True, True, True]
     assert batch["has_transition_state"].tolist() == [False, False]
     assert batch["ts_displacements"].shape == (3, 3)
@@ -77,3 +79,10 @@ def test_basin_collate_supports_variable_known_event_counts():
     assert batch["cells"].shape == (2, 3, 3)
     assert batch["pbc"].tolist() == [[False, False, False], [True, True, True]]
     assert batch["transition_states"] == [[None, None], [None]]
+
+
+def test_pairwise_pyg_bridge_requires_optional_model_dependencies():
+    batch = collate_pairwise([_dataset().pairwise_item("e0")])
+
+    with pytest.raises(ImportError, match="torch.*torch-geometric"):
+        pairwise_batch_to_pyg_data(batch)

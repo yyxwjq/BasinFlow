@@ -67,7 +67,7 @@ An event seed should enter the model in three forms:
 
 ```text
 node scalar condition:
-  active_prior, movable_mask, fixed_mask, seed_type, local scores
+  active_prior, movable_mask, seed_type, local scores
 
 node vector condition:
   seed_direction, seed_displacement, pseudo_velocity

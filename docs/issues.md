@@ -52,12 +52,10 @@ Low priority — no current use case.
 
 ## 4. Geometry invariance tests
 
-**Status**: missing.  **Affects**: `tests/`.
+**Status**: done.  **Affects**: `tests/test_geometry_invariance.py`.
 
-`AGENTS.md` requires geometry invariance tests (translation, rotation,
-permutation) before large model training.  No such tests exist yet.
-
-Must be addressed before Stage 3 (Neural Event Proposer).
+Translation, rotation, permutation, and MIC-safe periodic translation
+tests are present for pairwise geometry labels.
 
 ---
 
