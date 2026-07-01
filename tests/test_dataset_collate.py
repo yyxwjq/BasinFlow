@@ -1,3 +1,5 @@
+import builtins
+
 import numpy as np
 
 import pytest
@@ -84,5 +86,31 @@ def test_basin_collate_supports_variable_known_event_counts():
 def test_pairwise_pyg_bridge_requires_optional_model_dependencies():
     batch = collate_pairwise([_dataset().pairwise_item("e0")])
 
-    with pytest.raises(ImportError, match="torch.*torch-geometric"):
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("torch_geometric")
+
+    data = pairwise_batch_to_pyg_data(batch)
+
+    assert data.pos.shape == (2, 3)
+    assert data.product_pos.shape == (2, 3)
+    assert data.displacement.shape == (2, 3)
+    assert data.active_mask.dtype == torch.bool
+    assert data.movable_mask.dtype == torch.bool
+    assert data.batch.tolist() == [0, 0]
+    assert data.ptr.tolist() == [0, 2]
+    assert data.edge_index.shape == (2, 0)
+
+
+def test_pairwise_pyg_bridge_reports_missing_optional_dependencies(monkeypatch):
+    batch = collate_pairwise([_dataset().pairwise_item("e0")])
+    real_import = builtins.__import__
+
+    def fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "torch_geometric.data":
+            raise ImportError("simulated missing torch-geometric")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
+    with pytest.raises(ImportError, match="optional model dependencies"):
         pairwise_batch_to_pyg_data(batch)

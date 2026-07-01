@@ -6,7 +6,7 @@ import pytest
 from fscgp.data.dataset import EventDataset
 from fscgp.data.raw_events import read_events_directory
 from fscgp.data.records import BasinRecord, EventRecord, StructureRecord
-from fscgp.flow import build_product_flow_item
+from fscgp.flow import build_product_flow_item, flow_item_to_torch_batch
 from fscgp.seeds import ZeroSeedGenerator, event_seed_from_pairwise_item
 
 
@@ -120,6 +120,24 @@ def test_product_flow_item_passes_masks_and_direction_through():
     assert np.array_equal(flow_item["active_mask"], item["active_mask"])
     assert np.array_equal(flow_item["movable_mask"], item["movable_mask"])
     assert np.allclose(flow_item["event_direction"], item["event_direction"])
+
+
+def test_flow_item_to_torch_batch_preserves_masks_and_fixed_velocity_zero():
+    torch = pytest.importorskip("torch")
+    item = _pairwise_item()
+    seed = ZeroSeedGenerator().generate(item)
+    flow_item = build_product_flow_item(item, seed)
+
+    batch = flow_item_to_torch_batch(flow_item)
+
+    assert batch["reactant_positions"].shape == (3, 3)
+    assert batch["initial_positions"].dtype == torch.float32
+    assert batch["target_velocity"].dtype == torch.float32
+    assert batch["movable_mask"].dtype == torch.bool
+    assert batch["movable_mask"].tolist() == [False, True, False]
+    assert torch.allclose(batch["target_velocity"][~batch["movable_mask"]], torch.zeros((2, 3)))
+    assert batch["batch"].tolist() == [0, 0, 0]
+    assert batch["ptr"].tolist() == [0, 3]
 
 
 def test_product_flow_item_works_on_real_events_when_env_is_set():

@@ -6,8 +6,13 @@ import pytest
 from fscgp.data.dataset import EventDataset
 from fscgp.data.raw_events import read_events_directory
 from fscgp.data.records import BasinRecord, EventRecord, StructureRecord
-from fscgp.flow import build_product_flow_item
-from fscgp.models import DummyProductEventFlow, masked_velocity_mse
+from fscgp.flow import build_product_flow_item, flow_item_to_torch_batch
+from fscgp.models import (
+    DummyProductEventFlow,
+    MinimalProductEventFlow,
+    masked_velocity_mse,
+    torch_masked_velocity_mse,
+)
 from fscgp.seeds import ProductDisplacementSeedGenerator, ZeroSeedGenerator
 
 
@@ -80,6 +85,75 @@ def test_dummy_product_event_flow_can_return_zero_velocity_for_product_seed():
     output = DummyProductEventFlow(mode="target_velocity").forward(flow_item, t=0.5)
 
     assert np.allclose(output, 0.0)
+
+
+def test_torch_masked_velocity_mse_uses_movable_atoms_only():
+    torch = pytest.importorskip("torch")
+    batch = flow_item_to_torch_batch(_flow_item())
+    prediction = torch.zeros_like(batch["target_velocity"])
+    prediction[~batch["movable_mask"]] = 100.0
+
+    loss = torch_masked_velocity_mse(prediction, batch)
+    expected = torch.mean(batch["target_velocity"][batch["movable_mask"]] ** 2)
+
+    assert torch.allclose(loss, expected)
+
+
+def test_torch_masked_velocity_mse_returns_grad_zero_for_all_immovable_atoms():
+    torch = pytest.importorskip("torch")
+    batch = flow_item_to_torch_batch(_flow_item())
+    batch["movable_mask"] = torch.zeros_like(batch["movable_mask"])
+    prediction = torch.ones_like(batch["target_velocity"], requires_grad=True)
+
+    loss = torch_masked_velocity_mse(prediction, batch)
+    loss.backward()
+
+    assert torch.allclose(loss, torch.tensor(0.0))
+    assert prediction.grad is not None
+    assert torch.allclose(prediction.grad, torch.zeros_like(prediction))
+
+
+def test_minimal_product_event_flow_backward_produces_gradients():
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(0)
+    batch = flow_item_to_torch_batch(_flow_item())
+    model = MinimalProductEventFlow(hidden_dim=16)
+
+    output = model(batch, t=0.5)
+    loss = torch_masked_velocity_mse(output, batch)
+    loss.backward()
+
+    assert output.shape == batch["target_velocity"].shape
+    assert torch.allclose(output[~batch["movable_mask"]], torch.zeros((2, 3)))
+    assert any(
+        parameter.grad is not None and torch.any(parameter.grad != 0)
+        for parameter in model.parameters()
+    )
+
+
+def test_minimal_product_event_flow_overfits_toy_event():
+    torch = pytest.importorskip("torch")
+    torch.manual_seed(0)
+    batch = flow_item_to_torch_batch(_flow_item())
+    model = MinimalProductEventFlow(hidden_dim=32)
+    optimizer = torch.optim.Adam(model.parameters(), lr=0.05)
+
+    initial_loss = None
+    for step in range(40):
+        optimizer.zero_grad()
+        prediction = model(batch, t=0.5)
+        loss = torch_masked_velocity_mse(prediction, batch)
+        if step == 0:
+            initial_loss = float(loss.detach())
+        loss.backward()
+        optimizer.step()
+
+    with torch.no_grad():
+        final_loss = float(torch_masked_velocity_mse(model(batch, t=0.5), batch))
+
+    assert initial_loss is not None
+    assert final_loss < initial_loss * 0.1
+    assert final_loss < 1e-3
 
 
 def test_dummy_product_event_flow_works_on_real_au_event_when_env_is_set():

@@ -90,6 +90,22 @@ Status:
 
 ## Stage 3: Seed-Conditioned Product/Event Flow
 
+### Phase 1 status: minimal trainable loop complete
+
+Implemented:
+
+- Torch conversion for product-flow items.
+- PyG bridge shape coverage for collated pairwise batches.
+- A deliberately small `MinimalProductEventFlow` for smoke testing only.
+- Torch masked velocity MSE over `movable_mask`.
+- `loss.backward()` and toy overfit tests.
+
+Still not implemented:
+
+- A production EGNN/PaiNN-style backbone.
+- Dynamic graph reconstruction inside a sampling loop.
+- Basin-level candidate sampling and benchmark reports.
+
 Implement:
 
 - Conditional flow matching model interface.
@@ -129,7 +145,7 @@ Tests:
 - Active-atom and direction targets can be derived from toy R/P data.
 - Dynamic graph update changes edges when geometry changes.
 - Sampling produces finite product candidates and valid records.
-- Fixed atoms remain fixed or near-fixed when fixed masks are provided.
+- Immovable atoms remain fixed or near-fixed when `~movable_mask` is provided.
 - Rotating/translating/permuting a toy system preserves equivariant/invariant behavior.
 
 ## Stage 4: React-OT-Style TS Flow
@@ -228,6 +244,7 @@ Exit criteria:
 5. ~~Add geometry invariance tests (translation, rotation, permutation) before Stage 3.~~
 6. ~~Implement Stage 2 EON-style event dataset integration for `/Users/wx/Desktop/events`.~~
 7. ~~Define `EventSeed` and seed-derived product-flow training targets.~~
-8. Implement the trainable Stage 3 product-event flow backbone and training loop.
-9. Add the basin-level mini benchmark before full TS-flow work.
-10. Select and ingest a second benchmark dataset with multi-atom or multi-element events.
+8. ~~Implement the minimal trainable Stage 3 product-flow loop.~~
+9. Implement the EGNN/PaiNN-style product-event flow backbone and sampling loop.
+10. Add the basin-level mini benchmark before full TS-flow work.
+11. Select and ingest a second benchmark dataset with multi-atom or multi-element events.

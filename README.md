@@ -3,8 +3,8 @@
 Learning-assisted KMC event proposal framework for reaction rate-table
 construction.
 
-> **Current stage**: Stage 2.5 (EON-style Event Dataset Integration +
-> seed/flow target contract). Stage 1 (Geometry & Data Core) is complete.
+> **Current stage**: Stage 3 Phase 1 (minimal trainable flow loop).
+> Stage 1–2.5 data, seed, and flow-target contracts are complete.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ BASINFLOW_EVENTS_DIR=/Users/wx/Desktop/events \
 python -m pytest tests/test_raw_events.py::test_stage2_real_events_dataset_when_env_is_set -q
 ```
 
-## Implemented (Stage 1)
+## Implemented Capabilities
 
 | Module | Status |
 |--------|--------|
@@ -43,14 +43,17 @@ python -m pytest tests/test_raw_events.py::test_stage2_real_events_dataset_when_
 | Dynamic cutoff-graph builder with cell offsets | ✅ |
 | Pairwise & basin-level collation (variable atom counts, variable events/basin) | ✅ |
 | Seed/flow target contract with dummy product-event flow | ✅ |
-| 51 unit/integration tests plus 3 optional real-data checks | ✅ |
+| Minimal torch training loop smoke test (`loss.backward()` + toy overfit) | ✅ |
+| PyG bridge for collated pairwise batches | ✅ |
+| Unit/integration tests plus optional real-data checks | ✅ |
 
 ## TODO
 
 - [x] **Stage 2** — EON-style R/P/TS event dataset integration
 - [x] **Geometry invariance tests** — translation, rotation, permutation (required before Stage 3)
-- [ ] **Stage 3** — Trainable seed-conditioned product/event flow backbone
-- [ ] PyG `Data` bridge for collated batches
+- [x] **Stage 3 Phase 1** — minimal trainable product-flow loop
+- [x] PyG `Data` bridge for collated batches
+- [ ] **Stage 3 Phase 2** — EGNN/PaiNN-style seed-conditioned product/event flow backbone
 - [ ] JSON/YAML metadata persistence for splits and basin metadata
 - [ ] **Stage 4** — React-OT-style TS flow
 - [ ] **Stage 5** — Basin-level event proposal benchmark
