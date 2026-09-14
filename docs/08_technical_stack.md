@@ -74,6 +74,14 @@ Required records:
 
 The source dataset should preserve basin-level grouping even if training uses pairwise samples.
 
+Stage 3 input boundary:
+
+- `EventCatalog` is a lightweight, read-only source/domain catalog.
+- `EventFlowDataset` and `BasinDataset` emit one PyG `EventData`
+  sample each; the standard PyG `DataLoader` is the only collation layer.
+- Torch and PyG remain optional `models` dependencies.  The raw event reader
+  remains usable without them; external source conversion is handled by tools.
+
 ## Relaxation and Validation Backends
 
 Initial relaxation options:
@@ -130,7 +138,7 @@ Required early tests:
 Recommended initial layout:
 
 ```text
-src/fscgp/
+src/basinflow/
   data/
   geometry/
   graphs/

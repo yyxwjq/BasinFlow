@@ -161,7 +161,7 @@ Mitigation:
 
 ## Open Questions
 
-- How much of the current `/Users/wx/Desktop/events` Au dataset should be used for the first train/validation/test split?
+- How much of the current `/Users/wx/Desktop/benchmark/au/events` Au dataset should be used for the first train/validation/test split?
 - Which additional molecular or periodic datasets should be added after the Au EON-style dataset?
 - Which relaxation backend will be used first?
 - Which saddle-search validator should be targeted first after the proposal benchmark exists?

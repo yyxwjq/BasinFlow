@@ -32,23 +32,24 @@ Tests:
 - PBC minimum-image distance and cell-offset edge construction.
 
 Status: complete.  See `examples/demo_pipeline.py` for an end-to-end
-walkthrough from raw extxyz files to trainable batches.
+walkthrough from raw ASE event files to trainable batches.
 
 ## Stage 2: EON-Style Event Dataset Integration  ✅ CORE COMPLETE
 
 Implement:
 
-- Import EON-style event folders such as `/Users/wx/Desktop/events`.
+- Import EON-style event folders such as `/Users/wx/Desktop/benchmark/au/events`.
 - Parse `basin_table.csv` into basin-level event groups.
-- Read multi-frame `event_*.extxyz` files with:
+- Read multi-frame `event_*.traj` or `event_*.extxyz` files with:
   - frame 0 as reactant.
   - frame 1 as product.
   - frame 2 as optional transition-state or saddle-like structure.
 - Preserve `move_mask` semantics through canonical `movable_mask`, plus cell, PBC, event ids, and basin ids. Do not add explicit masses fields in Stage 2; masses remain available through ASE when later physical seed priors need them.
-- Expose pairwise training records and basin-level evaluation records from the same dataset.
+- Store source data in an `EventCatalog`, then expose separate PyG pairwise
+  training and target-free basin-inference views.
 - Derive supervised labels:
-  - active atoms from `move_mask` when present.
-  - fallback active atoms from MIC reactant-product displacement.
+  - explicit source activity annotations when present.
+  - otherwise active atoms from MIC reactant-product displacement.
   - product displacement.
   - event direction.
   - optional TS displacement / TS structure target.
@@ -62,9 +63,9 @@ Purpose:
 
 Tests:
 
-- `/Users/wx/Desktop/events`-style table and event files are parsed into the expected number of basins and events.
-- Multi-frame extxyz files preserve reactant, product, and optional TS frames.
-- `move_mask` is converted into active labels.
+- `/Users/wx/Desktop/benchmark/au/events`-style table and event files are parsed into the expected number of basins and events.
+- Multi-frame trajectory/extxyz files preserve reactant, product, and optional TS frames.
+- `move_mask` is converted only into `movable_mask`, independently of labels.
 - Basin-level view returns multiple events for basins that have multiple events.
 - Splits do not put events from the same basin into different partitions.
 - Derived product displacement and event direction are finite and respect PBC flags.
@@ -78,15 +79,15 @@ Non-goal:
 Implemented:
 
 - `EventSeed` with scalar/vector/initial-geometry roles.
-- Seed generators for zero, Gaussian movable, and product-displacement seeds.
+- Initialization generators for zero, Gaussian movable, and product-displacement inits.
 - Product-flow target construction for straight-line conditional flow matching.
 - Dummy product-event flow and masked velocity loss for interface smoke tests.
 
 Status:
 
 - The data and contract layer is available for Stage 3.
-- A trainable EGNN/PaiNN-style backbone, sampling loop, and benchmark runner
-  are still Stage 3+ work.
+- A minimal trainable EGNN backbone, sampling loop, and no-relaxation
+  recall runner now exist as Stage 3 Phase 2 prototype work.
 
 ## Stage 3: Seed-Conditioned Product/Event Flow
 
@@ -94,28 +95,57 @@ Status:
 
 Implemented:
 
-- Torch conversion for product-flow items.
-- PyG bridge shape coverage for collated pairwise batches.
-- A deliberately small `MinimalProductEventFlow` for smoke testing only.
+- Direct `EventData` PyG training samples and standard `DataLoader` batching.
 - Torch masked velocity MSE over `movable_mask`.
 - `loss.backward()` and toy overfit tests.
+- Multi-graph product-flow batching for fixed-size and full-batch training.
 
 Still not implemented:
 
-- A production EGNN/PaiNN-style backbone.
-- Dynamic graph reconstruction inside a sampling loop.
-- Basin-level candidate sampling and benchmark reports.
+- e3nn/LEFTNet alternatives; dual-geometry PaiNN is now implemented.
+- Relaxation-aware clustering.
+- Full held-out benchmark reports with experiment summaries.
+
+### Phase 2 status: dual-geometry PaiNN and legacy EGNN available
+
+The 2026-09-10 default path uses the scaled dual-geometry PaiNN, fresh Gaussian
+initialization by epoch, velocity-only supervision and displacement-derived
+event activity/direction. The historical EGNN multi-head items below remain
+available for checkpoint compatibility. Fixed-budget Au/Pt/Transition1x runs
+and their limitations are reported in `13_0910_engineering_report.md`; no Stage 4
+or physical-validation completion follows from these geometry results.
+
+Implemented:
+
+- Plain-PyTorch EGNN product/event flow using PyG-style `edge_index`
+  conventions and explicit PBC-aware edge vectors.
+- Active-atom and event-direction heads.
+- Combined product-flow loss with velocity, active, and direction terms.
+- Minimal train loop with checkpoint output.
+- Multi-initialization candidate sampler producing `CandidateRecord` and generated
+  `StructureRecord` outputs.
+- No-relaxation candidate clustering and basin-level recall reports.
+- Product-flow quality metrics for train/val/test splits, including
+  no-relaxation rollout RMSD and init-only oracle RMSD.
+- Minimal JSON split manifest save/load utilities.
+- Explicit `active_prior` versus `target_active_mask` flow contracts to
+  avoid training/inference label leakage.
+- `EventCatalog` / `BasinSplit` boundaries, deterministic dataset flow-time
+  sampling, and direct `EventFlowDataset` / `BasinDataset` views.
+- User-facing training scripts support `--batch-size N` and
+  `--batch-size full`; `training.log` records optimizer update steps, not
+  individual event-init samples.
 
 Implement:
 
-- Conditional flow matching model interface.
-- Reactant-conditioned graph encoder.
-- `EventSeed` representation with scalar, vector, and initial-geometry roles.
-- Active-atom prediction head.
-- Event-direction or displacement-field head.
-- Dynamic graph update during sampling.
-- Sampling loop with multiple seeds per basin.
-- Product candidate generation from:
+- Improve initialization/proposal quality beyond the current fixed generator
+  budget; the current sampler still produces one candidate per configured
+  initialization generator.
+- Add experiment summaries around persisted split manifests and RMSD
+  metrics.
+- Add stronger backbones or correctors only after the EGNN baseline is
+  measurable.
+- Product candidate generation remains:
 
 ```text
 reactant + event seed -> candidate product displacement / coordinates
@@ -126,7 +156,9 @@ Training:
 - Use pairwise event samples.
 - Train on interpolation or flow states between a seed-initialized proposal state and the product.
 - Derive active atoms from MIC product displacement.
-- Prefer `move_mask` active labels when present.
+- Prefer explicit source activity labels when present; otherwise derive them
+  from MIC reactant-product displacement.  Never reinterpret `move_mask` as
+  supervision.
 - Train the MVP with product-displacement flow loss, active-atom loss, and event-direction loss.
 - Treat TS/barrier/rate targets as masked or deferred to Stage 4 unless labels are explicitly available.
 - Evaluate basin-level product/event proposal quality.
@@ -181,7 +213,7 @@ Tests:
 Implement:
 
 - Basin-level benchmark runner.
-- Multi-seed product and TS candidate generation.
+- Multi-initialization product and TS candidate generation.
 - Known-event matching against Stage 2 products/TS labels.
 - Metrics report for product, TS, active atom, and direction quality.
 - Optional lightweight relaxation/clustering only when needed for a benchmark, not as a prerequisite to model training.
@@ -239,12 +271,12 @@ Exit criteria:
 
 1. ~~Choose the first molecule benchmark dataset.~~ → Au₁₀₁ cluster (periodic, 12 basins).
 2. ~~Choose the first periodic benchmark dataset.~~ → same Au system, PBC-aware.
-3. ~~Define the package layout.~~ → `src/fscgp/{data,geometry,graphs}`.
+3. ~~Define the package layout.~~ → `src/basinflow/{data,geometry,graphs}`.
 4. ~~Implement schema and I/O tests.~~ → core tests passing.
 5. ~~Add geometry invariance tests (translation, rotation, permutation) before Stage 3.~~
-6. ~~Implement Stage 2 EON-style event dataset integration for `/Users/wx/Desktop/events`.~~
+6. ~~Implement Stage 2 EON-style event dataset integration for `/Users/wx/Desktop/benchmark/au/events`.~~
 7. ~~Define `EventSeed` and seed-derived product-flow training targets.~~
 8. ~~Implement the minimal trainable Stage 3 product-flow loop.~~
-9. Implement the EGNN/PaiNN-style product-event flow backbone and sampling loop.
-10. Add the basin-level mini benchmark before full TS-flow work.
+9. ~~Implement the EGNN/PaiNN-style product-event flow backbone and sampling loop.~~ → EGNN prototype and dual-geometry PaiNN implemented; Stage 3 proposal quality remains under evaluation.
+10. ~~Add the basin-level mini benchmark before full TS-flow work.~~ → no-relaxation recall prototype complete.
 11. Select and ingest a second benchmark dataset with multi-atom or multi-element events.

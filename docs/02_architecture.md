@@ -1,5 +1,42 @@
 # Architecture
 
+## Current PaiNN path (2026-09-10)
+
+Stage 3 now offers a dual-geometry PaiNN backend alongside legacy EGNN checkpoint
+compatibility. `models/painn/painn.py` contains the tensor backbone, `layers.py`
+contains radial embeddings, cutoffs, messages, updates and vector readout, and
+`modules.py` adapts `EventData` and graph-level time to the tensor API. The
+backbone receives `positions_1=R`, `positions_2=x_t`, atomic numbers, Cartesian
+image shifts, edge indices and atom-level time. It returns velocity and scalar
+hidden features; it has no untrained active/direction heads.
+
+The default `stability_mode=scaled` normalizes scalar message/update inputs and
+scales vector messages, scalar dot products and residuals. These operations are
+invariant scalars or act on feature channels, preserving O(3) equivariance.
+The unscaled compatibility mode is retained for reproducing diagnostic runs;
+it overflowed during Pt training and is not recommended for new training.
+
+The adapter rebuilds the union of reference and current periodic radius graphs
+at every velocity evaluation, using pure PyTorch and retaining all image ids.
+Geometry is recomputed from differentiable coordinates and integer offsets.
+The flow state uses a shared unwrapped lift relative to R; simultaneous per-atom
+image shifts of R and x_t preserve the result. Independent wrapping of the two
+states changes that lift and must not be performed inside integration.
+
+The approved default objective is movable-atom component-mean velocity MSE.
+Active atoms and unit directions are derived from the final MIC displacement,
+with provenance recorded in each candidate. Gaussian noise affects x_0 and is
+redrawn reproducibly by epoch; the PaiNN does not receive the original Gaussian
+vector as an additional persistent condition. `active_prior` and `movable_mask`
+remain scalar inputs. The older multi-head/seed-vector description below records
+the legacy prototype, not the current default PaiNN training contract.
+
+Sampling uses left-endpoint Euler with dynamic graphs. This integration rule is
+explicitly recorded; it is not a midpoint or Heun solver. The exact tensor radius
+graph has quadratic pair-search cost per structure, with chunked temporary
+memory. CPU is tested; accelerator performance and large-system scaling need
+separate qualification before deployment at that scale.
+
 ## Recommended Model Direction
 
 The recommended generator is a seed-conditioned flow-matching event proposer over atomic displacements, active-region scores, candidate product coordinates, and optional transition-state coordinates.
@@ -18,13 +55,13 @@ The framework should keep the model interface generic enough to support diffusio
 ## High-Level Pipeline
 
 ```text
-EventDataset
-  -> BasinSampler
-  -> SeedGenerator
-  -> ProductEventFlow
-  -> TSFlow
-  -> DynamicPBCGraphBuilder
-  -> CandidateSampler
+EventCatalog
+  ├─ EventFlowDataset (event-level pairwise training)
+  │    └─ EGNNFlow
+  └─ BasinDataset (basin-level inference)
+       └─ EGNNFlow → CandidateSampler
+                         ↓
+                  DynamicPBCGraphBuilder
   -> RelaxationRunner
   -> ProductClusterer
   -> SaddleValidator
@@ -34,25 +71,44 @@ EventDataset
 
 ## Core Components
 
-### EventDataset
+### EventCatalog and PyG Views
 
-Loads basin-level and pairwise event samples. It should expose both:
+`EventCatalog` is the read-only domain boundary.  It owns
+`StructureRecord`, `EventRecord`, and `BasinRecord`, validates their
+cross-references and frame consistency, and supports basin-only subsets and
+reproducible `BasinSplit` manifests.  It does not tensorize data, sample flow
+times, construct graphs, or choose seeds.
 
-- Pair records for training.
-- Basin records for validation and sampling.
+`EventFlowDataset` is the Stage 3 pairwise training view.  One sample is a
+known event plus an initializer and is emitted directly as an `EventData`
+(PyG `Data`) object.  `BasinDataset` is the inference view.  One
+sample is a basin plus an initializer and contains only reactant-derived
+conditions; known products, true active labels, TS frames, and `target_*`
+fields never enter it.
 
 The first concrete dataset direction is an EON-style event table plus multi-frame event files:
 
 ```text
 basin_table.csv
+event_*.traj  # preferred when FixAtoms constraints must round-trip
 event_*.extxyz
 ```
 
-Each event file should preserve reactant, product, and optional transition-state frames. Active labels should use `move_mask` when present, with MIC displacement-derived labels as a fallback.
+Each event file preserves reactant, product, and optional transition-state
+frames.  `move_mask` becomes only the `movable_mask` constraint.  Activity
+supervision uses an explicit `EventRecord.active_atoms` annotation when
+available, otherwise it is derived from MIC reactant-to-product displacement.
 
 ### EventSeed and SeedGenerator
 
 Produces initial proposal states or perturbation directions. The seed is not the answer. It is a mechanism for diversity. In BasinFlow, a seed should be interpreted as a proposed exploration direction or pseudo-dynamical perturbation, not as a hidden product label.
+
+User-facing generator classes use `Init` names such as `ZeroInit`,
+`GaussianInit`, and `ProductInit` to make this clearer: they generate
+initial states or perturbation initializations for the flow, not final
+products.  The lower-level `EventSeed` record remains the Stage 3 data
+contract because it stores scalar conditions, vector conditions, and the
+initial geometry in one object.
 
 Seed types can include:
 
@@ -187,7 +243,10 @@ The first training objective should be simple and robust:
 L = L_product_displacement + lambda_active L_active + lambda_direction L_direction
 ```
 
-All three targets can be derived from reactant/product pairs, with `move_mask` preferred for active labels when present.
+All three targets derive from reactant/product pairs.  Explicit activity
+annotations take precedence; otherwise activity derives from MIC displacement.
+`movable_mask` remains a hard generation constraint and is never silently
+substituted for a true activity label.
 
 TS training flow:
 

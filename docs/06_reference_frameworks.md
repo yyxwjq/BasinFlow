@@ -1,5 +1,35 @@
 # Reference Frameworks
 
+## Benchmark protocol audit (2026-09-10 follow-up)
+
+The local ReactOT default is deterministic R/P-conditioned TS generation;
+MolGEN's shipped entry points also primarily exercise TS generation despite
+its product-conditioning branch. Neither default TS metric is an R-only
+product-generation baseline. See `17_reference_protocol_audit.md` for verified
+data selection, source-noise, objective, optimizer, solver, RMSD and candidate
+selection differences, and the separately labeled custom 9000/536/537 split.
+
+## 2026-09-10 implementation update
+
+The new backend is a local, pure-PyTorch dual-geometry PaiNN, organized as
+`models/painn/{painn,layers,modules}.py`. LiFlow informs the separate reference
+and flow-state radial filters, scalar/vector messages, invariant gates, and
+tensor/flow adapter boundary. AdsorbDiff informs Gaussian/Bessel filter choices
+and smooth polynomial/cosine envelopes. The implementation follows the equations
+independently; no reference repository or complete module was imported.
+
+Gaussian initialization supplies the initial flow geometry; its original random
+vector is not persistently fed to the PaiNN velocity field. Training redraws
+reproducible noise each epoch. Velocity-only supervision is now the default;
+active atoms and directions are derived from final candidate displacement.
+Physical seed conditioning can be added explicitly when it is distinct from
+the transport noise, rather than restoring a hidden source-noise shortcut.
+
+See `12_transition1x_split_audit.md` for verified OA source partitions and the
+independent R/P coordinate rotations. Source membership replication is distinct
+from reproducing OA's object-aware joint diffusion objective or reverse-reaction
+augmentation. The local validation file is not an independent test file.
+
 ## Policy
 
 Reference frameworks should remain outside this repository unless a small, specific module is intentionally ported.
@@ -34,6 +64,19 @@ Potential reuse:
 - Dataset organization patterns.
 - Conditional generation training loop ideas.
 - Molecular baseline examples.
+
+Transition1x conversion decision (2026-09-01):
+
+- BasinFlow converts OAReactDiff's columnar `train.pkl` format once through
+  `tools/transition1x_to_events.py`; the core package never reads the pickle.
+- The `use_ind` selection is retained in source order.  Each selected reaction
+  becomes a `transition1x_single_event_molecule` pseudo-basin so it can share
+  the pairwise data contract while remaining explicitly distinct from a real
+  multi-event KMC basin.
+- R, P, and TS can be centroid-centered independently at conversion time to
+  remove arbitrary whole-molecule translation.  Only R-to-P product-flow
+  supervision is used in the Stage 3 experiment; TS remains in the standard
+  event file for later modules, not as a Stage 3 target.
 
 ## akmc-product-generation
 
@@ -70,6 +113,32 @@ Recommendation:
 
 - Do not continue by directly expanding `akmc-product-generation` as the main codebase.
 - Use it as a reference for migration risks and PBC edge cases.
+
+## EGNN and egnn-pytorch
+
+Paths:
+
+```text
+/Users/wx/Desktop/yyxwjq/egnn
+/Users/wx/Desktop/yyxwjq/egnn-pytorch
+```
+
+Useful ideas:
+
+- Clean EGNN message-passing blocks using `edge_index`, scalar edge messages, and equivariant vector updates.
+- Sparse/PyG-style graph input conventions without requiring a dense fully connected graph.
+- Equivariance tests for translation and rotation behavior.
+
+Limitations for this project:
+
+- The reference implementations do not directly handle BasinFlow's basin/event records, `EventSeed` semantics, or PBC cell-offset edge vectors.
+- The PyG implementation is useful as an interface reference, but BasinFlow's first EGNN core should remain plain PyTorch so PBC-aware `edge_vectors` stay explicit.
+
+Potential reuse:
+
+- Local EGNN layer structure.
+- Scatter-based aggregation.
+- Equivariance test patterns.
 
 ## AdsorbDiff
 
@@ -111,6 +180,9 @@ Useful ideas:
 - Prior or seed state as an exploration initializer.
 - Propagator-corrector separation.
 - Rollout from current structures.
+- A narrow dataset boundary: raw loading and single-sample PyG construction
+  are separate from framework batching, so model code receives one consistent
+  graph object rather than nested intermediate dictionaries.
 
 Limitations for this project:
 
@@ -122,6 +194,9 @@ Potential reuse:
 - Flow matching objective design.
 - Sampler structure.
 - Corrector concept.
+- `EventData` plus PyG `DataLoader` responsibility split.  BasinFlow borrows
+  this interface discipline only; it does not import Li-ion trajectory-delay
+  targets, Lightning lifecycle code, or static periodic graph assumptions.
 
 ## React-OT
 
@@ -245,6 +320,7 @@ Recommended synthesis:
 
 - Use OAReactDiff for molecular conditional generation concepts.
 - Use akmc-product-generation as a record of periodic adaptation issues and PBC tensor contracts.
+- Use EGNN and egnn-pytorch for the first plain-PyTorch EGNN product/event-flow backbone and equivariance tests.
 - Use AdsorbDiff for local periodic generation and relaxation-after-generation patterns.
 - Use liflow for conditional flow matching and seed-driven diverse sampling.
 - Use TrajCast for dynamic PBC graph rollout, multi-frame ASE trajectory handling, and physically meaningful velocity/perturbation seeds.

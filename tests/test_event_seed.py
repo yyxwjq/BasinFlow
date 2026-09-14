@@ -1,12 +1,12 @@
 import numpy as np
 import pytest
 
-from fscgp.data.dataset import EventDataset
-from fscgp.data.records import BasinRecord, EventRecord, StructureRecord
-from fscgp.seeds import EventSeed, event_seed_from_pairwise_item
+from basinflow.data.catalog import EventCatalog
+from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.seeds import EventSeed, SeedContext, event_seed_from_context
 
 
-def _pairwise_item():
+def _seed_context():
     structures = {
         "r": StructureRecord(
             "r",
@@ -26,7 +26,9 @@ def _pairwise_item():
     }
     events = {"e": EventRecord("e", "r", "p", "b")}
     basins = {"b": BasinRecord("b", "r", ["e"])}
-    return EventDataset(structures, events, basins).pairwise_item("e")
+    catalog = EventCatalog(structures, events, basins)
+    target = catalog.event_target("e")
+    return SeedContext(target.event.event_id, target.event.basin_id, target.reactant), target
 
 
 def test_event_seed_validates_array_shapes():
@@ -57,36 +59,36 @@ def test_event_seed_rejects_nonzero_fixed_atom_vectors():
 
 
 def test_event_seed_initial_positions_are_reactant_plus_seed_displacement():
-    pairwise = _pairwise_item()
+    context, target = _seed_context()
     seed = EventSeed(
         seed_id="manual",
         seed_type="test",
         seed_displacement=np.array([[0.0, 0.0, 0.0], [0.0, 0.2, 0.0], [0.0, 0.0, 0.0]]),
         seed_direction=np.array([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]]),
-        active_prior=pairwise["active_mask"],
-        movable_mask=pairwise["movable_mask"],
+        active_prior=target.active_mask,
+        movable_mask=context.movable_mask,
     )
 
     assert np.allclose(
-        seed.initial_positions(pairwise["reactant"].positions),
-        pairwise["reactant"].positions + seed.seed_displacement,
+        seed.initial_positions(context.reactant.positions),
+        context.reactant.positions + seed.seed_displacement,
     )
 
 
-def test_event_seed_can_be_built_from_pairwise_item():
-    pairwise = _pairwise_item()
+def test_event_seed_can_be_built_from_seed_context():
+    context, target = _seed_context()
 
-    seed = event_seed_from_pairwise_item(
-        pairwise,
+    seed = event_seed_from_context(
+        context,
         seed_id="from-pair",
         seed_type="product_displacement",
-        seed_displacement=pairwise["displacement"],
+        seed_displacement=target.displacement,
     )
 
     assert seed.seed_id == "from-pair"
     assert seed.seed_type == "product_displacement"
-    assert np.array_equal(seed.movable_mask, pairwise["movable_mask"])
-    assert np.array_equal(seed.active_prior, pairwise["active_mask"])
+    assert np.array_equal(seed.movable_mask, context.movable_mask)
+    assert np.array_equal(seed.active_prior, target.active_mask)
     assert np.allclose(seed.seed_displacement[0], 0.0)
     assert np.allclose(seed.seed_displacement[2], 0.0)
     assert np.allclose(seed.seed_direction[1], [0.0, 1.0, 0.0])

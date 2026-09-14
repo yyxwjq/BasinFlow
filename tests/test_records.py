@@ -2,7 +2,7 @@ import numpy as np
 from ase import Atoms
 from ase.calculators.singlepoint import SinglePointCalculator
 
-from fscgp.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
 
 
 def test_structure_record_represents_molecule_with_vacuum_cell_and_no_pbc():

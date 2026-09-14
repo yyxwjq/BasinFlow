@@ -133,3 +133,56 @@ Before implementing new code:
 8. If using ideas from a reference project, update `docs/06_reference_frameworks.md` and `docs/09_reference_code_notes.md`.
 
 Do not assume one reactant has only one correct product. For this project, one reactant basin may have many valid events, and unknown generated events require validation rather than immediate rejection.
+
+## Behavioral Coding Rules
+
+These rules reduce common agent mistakes. They complement the project-specific scientific rules above and do not override them.
+
+### Think Before Coding
+
+Before implementing, state the working assumption when it affects scientific framing, train/inference semantics, data leakage, benchmark validity, public interfaces, or destructive edits.
+
+If ambiguity affects any of those areas, stop and ask. For low-risk local choices already implied by docs or surrounding code, state the assumption and proceed.
+
+For model, training, sampling, or benchmark changes, explicitly identify whether the path is pairwise training, basin-level inference, oracle diagnostic, no-relaxation geometric recall, relaxed product recall, or saddle-validated event recall.
+
+### Simplicity First
+
+Use the minimum code that solves the current staged task. Do not add speculative features, broad abstractions, or new dependencies.
+
+Configuration is justified only when it supports reproducible experiments, dataset paths, split manifests, model/sampling hyperparameters, runtime device selection, or benchmark reports.
+
+Do not add defensive code for impossible internal states, but do validate user-facing scientific data contracts: event frame counts, atom counts, masks, PBC/cell shapes, split manifests, and train/inference inputs.
+
+### Surgical Changes
+
+Touch only files required by the task. Do not refactor adjacent code, rename concepts, or update unrelated docs.
+
+Preserve current project contracts:
+
+- `movable_mask` is canonical; fixed atoms are represented as `~movable_mask`.
+- `active_prior` is model input; `target_active_mask` is supervision.
+- Product-displacement/oracle initialization is diagnostic only, not a basin-level inference input.
+- No-relaxation recall is geometric candidate recall, not validated KMC event recall.
+
+Do not revert or clean unrelated uncommitted work unless explicitly requested.
+
+### Goal-Driven Execution
+
+For each non-trivial task, define success criteria before editing.
+
+For code behavior, prefer targeted tests. For examples or CLIs, run a smoke command. For training/sampling changes, verify expected artifacts such as `checkpoint.pt`, `split_manifest.json`, `config.resolved.ini`, `training.log`, and metric JSON. For scientific claims, report exact metric definitions and whether relaxation or saddle validation was used.
+
+Stage 3 training/sampling changes must state:
+
+- dataset or fixture used;
+- whether splits are newly generated or loaded;
+- whether evaluation is pairwise rollout, basin-level sampling, no-relaxation recall, or validated event recall;
+- whether oracle inputs are prohibited or intentionally used for diagnostics;
+- whether training target and sampling protocol are semantically aligned.
+
+### Stage Boundary
+
+Follow `docs/05_development_plan.md` and the current stage in `README.md`.
+
+At the current Stage 3 Phase 2 prototype stage, prioritize proposal quality, initialization coverage, train/sampling consistency, benchmark reproducibility, and adding a second benchmark dataset. Do not start Stage 4 TS flow, Stage 5 physical validation, or Stage 6 EON integration unless explicitly requested.

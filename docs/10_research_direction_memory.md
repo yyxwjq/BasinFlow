@@ -1,13 +1,37 @@
 # Research Direction Memory
 
+## Approved engineering direction (2026-09-10)
+
+Use pure-PyTorch dual-geometry PaiNN for new Stage 3 experiments, organized as
+`painn.py`, `layers.py`, and `modules.py`. LiFlow supplies the dual-state and API
+design reference; AdsorbDiff supplies radial/cutoff and numerical-stability
+design references. Keep legacy EGNN checkpoint support, but do not replace the
+requested PaiNN with a minimal EGNN-style coordinate layer.
+
+Default loss is movable-atom velocity MSE, without auxiliary activity/direction
+losses. Recover activity and direction from final displacement. Transport noise
+is redrawn each epoch and enters the initial flow geometry, not a persistent
+noise shortcut. Separate future physical event conditions from that random
+source. Pairwise training and basin-level target-free generation remain the
+scientific contract; no relaxation or saddle-validation claim follows from
+geometric candidate recall alone.
+
+Place new local runs at `/Users/wx/Desktop/benchmark/0910/smoke` and `official`.
+Au/Pt use their saved historical basin splits; Transition1x uses verified source
+train/validation indices with the OA single-fragment filter (6,733/783, no test).
+See `12_transition1x_split_audit.md` for independent molecular frame rotations
+and the optional target-only Kabsch gauge. It must be recorded explicitly and
+is not applied silently. Au is a nonperiodic, one-movable-atom dataset despite
+having a nonzero cell; see `14_au_geometry_audit.md`.
+
 This note preserves the key decisions from the June 2026 planning discussion so future work does not drift back to an obsolete baseline-first plan.
 
 ## Current Project State
 
-- Stage 1 geometry and data core is implemented in `src/fscgp/{data,geometry,graphs}`.
+- Stage 1 geometry and data core is implemented in `src/basinflow/{data,geometry,graphs}`.
 - The repository contains tests for records, raw event loading, MIC geometry, neighbor lists, and dataset collation.
 - `docs/05_development_plan.md` records Stage 1 as complete with 20 passing tests.
-- The first concrete dataset is `/Users/wx/Desktop/events`, an EON-style Au event set with `basin_table.csv` and `event_*.extxyz` files.
+- The first concrete dataset is `/Users/wx/Desktop/benchmark/au/events`, an EON-style Au event set with `basin_table.csv` and `event_*.extxyz` files.
 - Each event file is a multi-frame structure. The current interpretation is:
   - frame 0: reactant
   - frame 1: product
@@ -188,7 +212,7 @@ This avoids treating physical seed information as a weak prompt.
 
 ## Immediate Next Work
 
-1. Reframe Stage 2 around `/Users/wx/Desktop/events`.
+1. Reframe Stage 2 around `/Users/wx/Desktop/benchmark/au/events`.
 2. Build a clean EON-style event dataset path that preserves `move_mask`, product, and TS frames.
 3. Add geometry invariance tests before model work.
 4. Implement a seed-conditioned product flow before TS generation.

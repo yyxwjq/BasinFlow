@@ -1,7 +1,7 @@
 import numpy as np
 
-from fscgp.data.records import StructureRecord
-from fscgp.graphs.neighborlist import build_neighbor_graph
+from basinflow.data.records import StructureRecord
+from basinflow.geometry.graph import build_neighbor_graph
 
 
 def test_nonperiodic_graph_edges_do_not_include_periodic_image_edges():

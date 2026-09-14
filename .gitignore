@@ -23,10 +23,20 @@ Thumbs.db
 
 # Jupyter
 .ipynb_checkpoints/
+notebooks/
 
-# pytest
+# tooling caches
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 
-# Claude Code
+# editor and agent configuration
 .claude/
-tests/notebook2ppt/
+.mcp.json
+
+# local experiment artifacts: example scripts default here, while the
+# benchmark runs themselves are kept outside the repository
+runs/
+
+# local HPC access helpers (credentials not tracked)
+.hpc/

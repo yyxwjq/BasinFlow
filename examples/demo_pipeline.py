@@ -13,6 +13,10 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
 # ---------------------------------------------------------------------------
 # 1.  Load the full dataset
 # ---------------------------------------------------------------------------
@@ -22,9 +26,11 @@ print("=" * 62)
 
 events_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path.home() / "Desktop/events"
 
-from fscgp.data import read_events_directory
+from basinflow.data.catalog import BasinSplit, EventCatalog
+from basinflow.data.pyg import EventFlowDataset
+from basinflow.seeds import ZeroInit
 
-ds = read_events_directory(events_dir)
+ds = EventCatalog.from_eon_directory(events_dir)
 print(f"\n📦  Loaded from  {events_dir}")
 print(f"    {len(ds.basin_ids):>4}  basins")
 print(f"    {len(ds.event_ids):>4}  events")
@@ -33,7 +39,9 @@ print(f"    {len(ds.structures):>4}  structure records")
 # ---------------------------------------------------------------------------
 # 2.  Inspect a structure — constraints → skeleton / active region
 # ---------------------------------------------------------------------------
-rid = ds.basins["0"].reactant_structure_id
+example_basin_id = ds.basin_ids[0]
+example_event_id = ds.event_ids[0]
+rid = ds.basins[example_basin_id].reactant_structure_id
 r = ds.structures[rid]
 n_fixed = int(r.constraints.sum()) if r.constraints is not None else 0
 n_free = r.n_atoms - n_fixed
@@ -48,9 +56,10 @@ print(f"    mobile   {n_free}  atoms  (trainable region)")
 # ---------------------------------------------------------------------------
 # 3.  Basin-level train / val / test split
 # ---------------------------------------------------------------------------
-from fscgp.data import split_basins
-
-train, val, test = split_basins(ds, train=0.7, val=0.15, test=0.15, seed=42)
+split = BasinSplit.create(ds, train=0.7, val=0.15, test=0.15, seed=42)
+train = split.select(ds, "train")
+val = split.select(ds, "val")
+test = split.select(ds, "test")
 
 print(f"\n📊  Basin-level split  (70 / 15 / 15,  seed=42)")
 print(f"    train   {len(train.basin_ids):>4}  basins,  {len(train.event_ids):>4}  events")
@@ -62,57 +71,64 @@ assert all_ids == set(ds.basin_ids), "basin leakage!"
 print("    ✓  no basin leakage between splits")
 
 # ---------------------------------------------------------------------------
-# 4.  Pairwise training view — MIC labels + constraints masks + TS data
+# 4.  Pairwise training view — PyG flow sample with MIC labels
 # ---------------------------------------------------------------------------
-item = train.pairwise_item(train.event_ids[0], active_threshold=0.1)
+pairwise_source = train if train.event_ids else ds
+target = pairwise_source.event_target(pairwise_source.event_ids[0], active_threshold=0.1)
+flow_dataset = EventFlowDataset(pairwise_source, [ZeroInit()], flow_time=0.5)
+item = flow_dataset[0]
+fixed_mask = ~item.movable_mask
 
-print(f"\n🎯  Pairwise training item  ·  {item['event_id']}")
-print(f"    displacement    range  [{item['displacement'].min():.4f},  "
-      f"{item['displacement'].max():.4f}]  Å")
-print(f"    active atoms    {int(item['active_mask'].sum())}  /  {item['active_mask'].shape[0]}")
-print(f"    fixed mask      {int(item['fixed_mask'].sum())}  atoms")
-print(f"    movable mask    {int(item['movable_mask'].sum())}  atoms")
-print(f"    has TS          {item['has_transition_state']}")
-if item["has_transition_state"]:
-    print(f"    ts_displacement range  [{item['ts_displacement'].min():.4f},  "
-          f"{item['ts_displacement'].max():.4f}]  Å")
-print(f"    event dir       shape  {item['event_direction'].shape}")
-print(f"    atom mapping    {item['atom_mapping']}")
+print(f"\n🎯  EventFlowDataset item  ·  {item.event_id}")
+print(f"    displacement    range  [{target.displacement.min():.4f},  "
+      f"{target.displacement.max():.4f}]  Å")
+print(f"    active atoms    {int(item.target_active_mask.sum())}  /  {item.num_nodes}")
+print(f"    fixed mask      {int(fixed_mask.sum())}  atoms")
+print(f"    movable mask    {int(item.movable_mask.sum())}  atoms")
+print(f"    has TS          {target.transition_state is not None}")
+print(f"    event dir       shape  {tuple(item.target_direction.shape)}")
+print(f"    source position shape  {tuple(item.source_pos.shape)}")
 
 # Verify derived labels are consistent
-assert item["fixed_mask"].sum() + item["movable_mask"].sum() == r.n_atoms
-assert not (item["fixed_mask"] & item["movable_mask"]).any()
+assert fixed_mask.sum() + item.movable_mask.sum() == item.num_nodes
+assert not (fixed_mask & item.movable_mask).any()
 print("    ✓  fixed/movable masks are consistent")
 
 # ---------------------------------------------------------------------------
 # 5.  Verify active_atoms auto-populated from move_mask (Stage 2)
 # ---------------------------------------------------------------------------
-e0 = ds.events["event_0"]
-print(f"\n🏷   EventRecord.active_atoms  ·  event_0")
-print(f"    source          {'move_mask (constraints)' if e0.active_atoms else 'MIC fallback'}")
-print(f"    active_atoms    {e0.active_atoms}")
+example_event = ds.events[example_event_id]
+print(f"\n🏷   EventRecord.active_atoms  ·  {example_event_id}")
+print(f"    source          {'move_mask (constraints)' if example_event.active_atoms else 'MIC fallback'}")
+print(f"    active_atoms    {example_event.active_atoms}")
 
 # ---------------------------------------------------------------------------
 # 6.  Basin view — multi-event groups with transition states
 # ---------------------------------------------------------------------------
-bitem = train.basin_item(train.basin_ids[0])
+basin_source = train if train.basin_ids else ds
+basin = basin_source.basins[basin_source.basin_ids[0]]
 
-print(f"\n🗂   Basin view  ·  {bitem['basin_id']}")
-print(f"    known events    {len(bitem['events'])}  →  {bitem['known_event_ids']}")
-for ev, ts in zip(bitem["events"], bitem["transition_states"]):
-    ts_id = ts.structure_id if ts else "None"
-    print(f"      {ev.event_id}  →  product {ev.product_structure_id}  ·  TS {ts_id}")
+print(f"\n🗂   Basin view  ·  {basin.basin_id}")
+print(f"    known events    {len(basin.known_event_ids)}  →  {basin.known_event_ids}")
+for event_id in basin.known_event_ids:
+    event = basin_source.events[event_id]
+    ts_id = event.transition_state_structure_id or "None"
+    print(f"      {event.event_id}  →  product {event.product_structure_id}  ·  TS {ts_id}")
 
 # ---------------------------------------------------------------------------
-# 7.  Collate a mini-batch (ready for model input)
+# 7.  PyG mini-batch (ready for model input)
 # ---------------------------------------------------------------------------
-from fscgp.data.collate import collate_pairwise
+from torch_geometric.loader import DataLoader
 
-batch = collate_pairwise(
-    [train.pairwise_item(eid) for eid in sorted(train.event_ids)[:4]]
+batch_event_ids = sorted(pairwise_source.event_ids)[:4]
+batch_dataset = EventFlowDataset(
+    pairwise_source.subset({pairwise_source.events[event_id].basin_id for event_id in batch_event_ids}),
+    [ZeroInit()],
+    flow_time=0.5,
 )
+batch = next(iter(DataLoader(batch_dataset, batch_size=len(batch_dataset), shuffle=False)))
 
-print(f"\n📦  Collated batch  (4 events)")
+print(f"\n📦  PyG batch  ({len(batch_dataset)} event/seed samples)")
 for key in sorted(batch.keys()):
     val = batch[key]
     if hasattr(val, "shape"):

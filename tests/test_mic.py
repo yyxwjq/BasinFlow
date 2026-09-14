@@ -1,6 +1,6 @@
 import numpy as np
 
-from fscgp.geometry.mic import (
+from basinflow.geometry.mic import (
     derive_active_atoms,
     derive_event_direction,
     displacement_norms,

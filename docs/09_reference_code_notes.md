@@ -1,5 +1,63 @@
 # Reference Code Notes
 
+## Explicit-partition and reference-protocol follow-up
+
+`17_reference_protocol_audit.md` records the inspected ReactOT and MolGEN
+executable paths. ReactOT's R/P midpoint-to-TS schedule, MolGEN's origin-Gaussian
+prior and L1/Beta-time training, and their reflection/capped RMSD conventions
+are distinct from the current R-only displacement flow. No reference code was
+copied. In particular, reference TS/product-fragment conditions must not enter
+ordinary BasinFlow reactant-only sampling. The custom external-partition loader
+and epoch validation/checkpoint facilities improve reproducibility; they do not
+claim reference-model reproduction.
+
+## PaiNN engineering update (2026-09-10)
+
+Inspected sources:
+
+- `liflow/liflow/model/models.py`: DualPaiNN reference/current geometries.
+- `liflow/liflow/model/layers.py`: scalar/vector interaction and update equations.
+- `liflow/liflow/model/modules.py`: graph-time broadcasting and clean R conditioning.
+- `AdsorbDiff/adsorbdiff/models/gemnet_oc/layers/radial_basis.py`: radial basis choices and the polynomial envelope.
+- `AdsorbDiff/adsorbdiff/models/painn/painn_denoising.py`: periodic vector prediction.
+
+Local implementation uses these mathematical/design ideas without importing a
+reference module. `DualPaiNN` lives in `models/painn/painn.py`; `PaiNN` in
+`modules.py` is the public BasinFlow adapter. Scalar state is `[N,F]`, vector
+state `[N,3,F]`; learned vector linear maps act only on feature channels.
+Readout gates are invariant and multiply a full Cartesian vector for each atom.
+Two independent radial filters consume R and x_t distances. Cutoffs multiply
+filter outputs, including biases, and gate each directional branch separately.
+Bessel embeddings use the finite sinc limit at zero; polynomial envelopes have
+zero first and second derivative at cutoff. No torch_scatter is required.
+
+`graphs/tensor_neighbors.py` implements exact directed multi-image PBC topology
+with bounded pair chunks. Reference/current edge unions avoid losing conditioning
+when a contact leaves the current cutoff. Unit tests compare topology to ASE,
+check strict componentwise O(3) equivariance, translations, permutations, mixed
+batches, image shifts, gradients, empty graphs and checkpoint restoration.
+
+The task does not use LiFlow's temperature or physical-lag conditions: it is
+basin-event proposal, not finite-time MD prediction. Source Gaussian noise enters
+only x_0; velocity-only loss and displacement-derived event semantics supersede
+the previous persistent-noise/three-head default. Full framework details are in
+`02_architecture.md`, source partition evidence in `12_transition1x_split_audit.md`.
+
+Explicit backend/config checkpoint metadata is required for new experiments.
+`models/factory.py` supports legacy EGNN loading, but the abandoned draft PaiNN
+weights are not architecture-compatible. Never silently load them non-strictly.
+
+The initial LiFlow-style unscaled multiplicative updates overflowed during real
+Pt training on a valid long-displacement event. The current `stability_mode=scaled`
+uses invariant LayerNorm on scalar message inputs and concatenated scalar/norm
+update inputs, feature-count scaling of vector messages and scalar dot products,
+and residual variance scaling. Vector Cartesian components are never normalized
+independently. This extends AdsorbDiff's scale-control ideas; it is not a claim
+of bitwise equivalence to its model. `stability_mode=none` is retained only for
+reproducing the first-run diagnostics; missing mode in older PaiNN checkpoint
+metadata explicitly resolves to `none`. Both behaviors are tested. See
+`15_painn_numerical_audit.md` for the saved failing-batch analysis.
+
 ## Purpose
 
 This document records concrete code-level lessons from the reference projects. It is intended for Codex, Claude, and future contributors who need to implement FS-CGP modules efficiently without rediscovering the same architecture details.
@@ -53,6 +111,22 @@ Do not copy directly:
 - One-to-one reaction framing as the final benchmark.
 - Direct product/TS RMSD metrics as the only success criterion.
 - Dataset-specific Transition1x pickle assumptions.
+
+Transition1x converter implemented in BasinFlow (2026-09-01):
+
+- `tools/transition1x_to_events.py` is a standalone converter for OAReactDiff's
+  pickle schema.  It validates the three columnar frame dictionaries and
+  writes standard BasinFlow event files plus `basin_table.csv` from atomic
+  numbers, coordinates, optional energies/forces, `use_ind`, and
+  `single_fragment` metadata.
+- No OAReactDiff source was copied.  The only reference used was the data
+  layout exposed by `BaseDataset` and `ProcessedTS1x`.
+- The converter has an explicit `--center` option.  It subtracts each frame's
+  unweighted centroid before writing, preventing arbitrary global translation
+  from becoming a product-flow target for multi-fragment rows.
+- This molecular experiment uses one event per pseudo-basin and reports only
+  pairwise, no-relaxation geometric diagnostics.  It must not be presented as
+  a basin-level event-recall or KMC saddle-validation benchmark.
 
 Key design warning:
 
@@ -223,14 +297,19 @@ Reusable ideas:
 
 FS-CGP mapping:
 
-- `seeds/`: adapt `Prior` concepts into event seeds such as Gaussian displacement, Maxwell-Boltzmann pseudo-velocity, active-region seed, and event-library motif seed.
+- `inits/`: adapt `Prior` concepts into event seeds such as Gaussian displacement, Maxwell-Boltzmann pseudo-velocity, active-region seed, and event-library motif seed.
 - `models/`: `DualPaiNN` is a strong reference for models that compare two coordinate states, useful for flow matching between seed/intermediate state and product.
 - `configs/`: preserve a clean config-driven interface for training and inference.
+- `data/pyg.py`: borrow only liflow's clear single-sample dataset boundary:
+  the source catalog creates domain records, a view creates one PyG sample,
+  and PyG owns batching.  This replaces BasinFlow's former repeated
+  pairwise/flow/torch dictionary transformations.
 
 Do not copy directly:
 
 - Li-ion-specific assumptions from adaptive priors.
 - Any target that assumes ordinary diffusion trajectory data rather than event samples.
+- Static periodic graph construction or trajectory-time-delay semantics.
 
 Key design warning:
 
@@ -277,7 +356,7 @@ FS-CGP mapping:
 - `geometry/mic.py`: use MIC displacement logic similar to `align_vectors_with_periodicity`, but implement and test project-local code.
 - `graphs/atomic_graph.py`: use `AtomicGraph` as a reference for dynamic PBC graph updating.
 - `sampling/candidate_sampler.py`: use `Forecast` as a reference for a config-driven rollout/sampling engine.
-- `seeds/`: velocity-conditioned design supports physically meaningful pseudo-velocity or local-perturbation seeds.
+- `inits/`: velocity-conditioned design supports physically meaningful pseudo-velocity or local-perturbation seeds.
 
 Do not copy directly:
 
@@ -288,6 +367,43 @@ Do not copy directly:
 Key design warning:
 
 TrajCast is a learned dynamics propagator. FS-CGP can borrow its rollout and dynamic graph patterns, but KMC event discovery still needs relaxation, clustering, and saddle validation.
+
+## EGNN / egnn-pytorch
+
+Paths:
+
+```text
+/Users/wx/Desktop/yyxwjq/egnn
+/Users/wx/Desktop/yyxwjq/egnn-pytorch
+```
+
+Important files:
+
+```text
+egnn/models/egnn_clean/egnn_clean.py
+egnn/models/gcl.py
+egnn-pytorch/egnn_pytorch/egnn_pytorch_geometric.py
+egnn-pytorch/tests/test_equivariance.py
+```
+
+Reusable ideas:
+
+- `E_GCL` structure: edge MLP over source/target node features plus distance, node scatter aggregation, and coordinate/vector update by multiplying edge vectors with learned scalar weights.
+- Explicit `edge_index` convention with shape `[2, E]`.
+- Equivariance testing strategy for translated and rotated inputs.
+- Sparse graph interface ideas from `egnn_pytorch_geometric.py`.
+
+FS-CGP mapping:
+
+- `models/egnn_product_flow.py`: implement a project-local EGNN core using plain PyTorch scatter operations and BasinFlow's PBC-aware `edge_vectors`.
+- `graphs/torch_graph.py`: keep neighbor-list and PBC image handling outside the model.
+- `tests/test_egnn_product_flow.py`: verify output shape, mask behavior, translation invariance, rotation equivariance, and toy overfit behavior.
+
+Do not copy directly:
+
+- Dense fully connected graph builders as the default sampling graph.
+- PyG `MessagePassing` internals as the first production model path.
+- Dataset-specific QM9/N-body assumptions.
 
 ## AMDEN
 
@@ -354,7 +470,7 @@ AdsorbDiff/adsorbdiff/trainers/sde_denoising_trainer.py
 Implement in FS-CGP:
 
 ```text
-src/fscgp/geometry/mic.py
+src/basinflow/geometry/mic.py
 tests/test_mic.py
 ```
 
@@ -378,8 +494,8 @@ AdsorbDiff/adsorbdiff/utils/atoms_to_graphs.py
 Implement in FS-CGP:
 
 ```text
-src/fscgp/graphs/atomic_graph.py
-src/fscgp/graphs/neighborlist.py
+src/basinflow/graphs/atomic_graph.py
+src/basinflow/graphs/neighborlist.py
 tests/test_graph_pbc.py
 ```
 
@@ -402,8 +518,8 @@ OAReactDiff/oa_reactdiff/dataset/transition1x.py
 Implement in FS-CGP:
 
 ```text
-src/fscgp/data/raw_events.py
-src/fscgp/data/records.py
+src/basinflow/data/raw_events.py
+src/basinflow/data/records.py
 tests/test_raw_events.py
 ```
 
@@ -416,7 +532,7 @@ Requirements:
 - ~~Frame 3+ may be path images~~ — **removed**.  The MVP adopts a
   strict three-frame model.  Path images belong to saddle validation
   (Stage 5), not to the event schema.
-- Split generation is automatic and reproducible via `split_basins()`
+- Split generation is automatic and reproducible via `BasinSplit.create()`
   (basin-level shuffle, seed-controlled).
 
 ### Seed and Prior Design
@@ -432,7 +548,7 @@ AdsorbDiff/adsorbdiff/trainers/sde_denoising_trainer.py
 Implement in FS-CGP:
 
 ```text
-src/fscgp/seeds/
+src/basinflow/inits/
 tests/test_seeds.py
 ```
 
@@ -455,7 +571,7 @@ AMDEN-code/src/pipeline.py
 Implement in FS-CGP:
 
 ```text
-src/fscgp/sampling/candidate_sampler.py
+src/basinflow/sampling/candidate_sampler.py
 tests/test_candidate_sampler.py
 ```
 
@@ -478,8 +594,8 @@ AMDEN-code/src/models/modules/material_schedule.py
 Implement in FS-CGP:
 
 ```text
-src/fscgp/relaxation/
-src/fscgp/refinement/
+src/basinflow/relaxation/
+src/basinflow/refinement/
 tests/test_relaxation_interface.py
 ```
 
@@ -503,8 +619,8 @@ AdsorbDiff/adsorbdiff/modules/evaluator.py
 Implement in FS-CGP:
 
 ```text
-src/fscgp/evaluation/
-src/fscgp/clustering/
+src/basinflow/evaluation/
+src/basinflow/clustering/
 tests/test_clustering.py
 ```
 

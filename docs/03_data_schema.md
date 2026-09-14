@@ -109,10 +109,9 @@ metadata: object
 
 - `system_type` can be inferred from `reactant.pbc` (all-False =
   molecule; any-True = periodic).
-- `split` is assigned at **training time** by `split_basins()`, which
-  randomly shuffles basins (not events) into train/val/test groups.
-  This prevents information leakage and lets users change ratios
-  without editing data files.
+- `split` is assigned at **training time** by a `BasinSplit`, which records
+  train/validation/test basin ids and the random seed.  `EventCatalog.subset()`
+  only accepts basin ids, preventing one basin's events from crossing splits.
 
 ---
 
@@ -154,9 +153,9 @@ Recommended `status` values:
 
 ## Raw Data Format
 
-### Event files (`event_*.extxyz`)
+### Event files (`event_*.traj` or `event_*.extxyz`)
 
-One multi-frame ASE extxyz file per event:
+One multi-frame ASE trajectory or extxyz file per event:
 
 - Frame 0 — reactant
 - Frame 1 — product
@@ -165,14 +164,14 @@ One multi-frame ASE extxyz file per event:
 The three-frame model is the only supported format for the MVP.
 Path images are not stored in event files.
 
-Extxyz atom properties such as `move_mask` are parsed by ASE and
-converted to `StructureRecord.movable_mask`.  ASE trajectory files
-(`*.traj`) are preferred when exact `FixAtoms` constraint round-trip is
-required.
+ASE trajectory files (`*.traj`) are preferred for EON conversions because
+they preserve `FixAtoms` constraints.  Extxyz atom properties such as
+`move_mask` are parsed by ASE and converted to
+`StructureRecord.movable_mask` when extxyz is used.
 
 ### Basin table (`basin_table.csv`)
 
-Produced by `tools/eon2data.py`.  Maps each event file to its basin:
+Produced by `tools/eon_to_events.py`.  Maps each event file to its basin:
 
 ```csv
 global_event,local_event,basin,file
@@ -180,7 +179,7 @@ global_event,local_event,basin,file
 1,1,0,event_1.extxyz
 ```
 
-The `file` and `basin` columns are consumed by `read_events_directory()`;
+The `file` and `basin` columns are consumed by `EventCatalog.from_eon_directory()`;
 other columns are informational.
 
 ### Directory layout
@@ -188,8 +187,8 @@ other columns are informational.
 ```text
 events/
 ├── basin_table.csv
-├── event_0.extxyz
-├── event_1.extxyz
+├── event_0.traj
+├── event_1.traj
 └── ...
 ```
 
@@ -198,43 +197,71 @@ events/
 ## Dataset Loading
 
 ```python
-from fscgp.data import read_events_directory, split_basins
+from basinflow.data import BasinSplit, EventCatalog
 
-ds = read_events_directory("path/to/events")
-train, val, test = split_basins(ds, train=0.7, val=0.15, test=0.15, seed=42)
+catalog = EventCatalog.from_eon_directory("path/to/events")
+split = BasinSplit.create(catalog, train=0.7, val=0.15, test=0.15, seed=42)
+train_catalog = split.select(catalog, "train")
 ```
 
-`read_events_directory` scans `event_*.extxyz` files, reads
-`basin_table.csv` for basin mapping, and returns an `EventDataset`.
-`split_basins` shuffles basins (not events) into reproducible splits.
+`EventCatalog.from_eon_directory()` scans `event_*.extxyz` files and falls
+back to `event_*.traj`, preserves `basin_table.csv` order, and accepts only
+two-frame (R/P) or three-frame (R/P/TS) events.  The separate
+`tools/transition1x_to_events.py` writes this same event-directory contract from a
+Transition1x pickle.  It maps every selected reaction to a
+`transition1x:<source_index>` pseudo-basin; this source is for pairwise
+no-relaxation geometry diagnostics, not a KMC basin benchmark.
 
 ---
 
 ## Training Views
 
-**Pairwise view** — for conditional flow-matching / diffusion training:
+**`EventFlowDataset`** — pairwise conditional-flow training:
 
 ```text
-(reactant, product, displacement, active_mask, event_direction, metadata)
+EventData(z, pos=x_t, reactant_pos, source_pos, movable_mask, active_prior,
+          seed_displacement, seed_direction, cell, pbc, flow_time, seed_type_id,
+          target_pos, target_velocity, target_active_mask, target_direction)
 ```
 
-**Basin view** — for candidate-generation benchmarks:
+`target_pos` is the MIC-unwrapped product geometry.  Fixed atoms have zero
+target velocity and target direction.  TS data remains in `EventCatalog` for
+the future R/P-to-TS Stage 4 view and is not zero-filled into Stage 3 batches.
+
+**`BasinDataset`** — target-free candidate inference:
 
 ```text
-reactant basin, known event set
+EventData(z, pos=reactant_pos + seed_displacement, reactant_pos, source_pos,
+          movable_mask, active_prior, seed_displacement, seed_direction,
+          cell, pbc, flow_time, seed_type_id, basin_id)
 ```
+
+It contains no product coordinates, `target_*` labels, true event direction,
+or TS information.  Known events remain in the catalog for post-sampling
+benchmark matching only.
 
 ---
 
 ## Collation
 
-Batching handles:
+The standard PyG `DataLoader` batches `EventData`; no project-specific dict
+collate stage exists.  Atom fields concatenate and `batch`/`ptr` identify the
+graph.  `cell`, `pbc`, `flow_time`, and `seed_type_id` stay graph-level:
 
-- Different atom counts (concatenated along atom axis).
-- Different numbers of events per basin (kept as lists).
-- Optional periodic cell / pbc fields (stacked per structure).
-- `movable_mask` is batched as an atom-level boolean array.  Fixed atoms
-  are represented by `~movable_mask`.
+```text
+pos:          [N_0 + ... + N_B, 3]
+batch / ptr:  atom-to-graph assignment and graph offsets
+cell:         [B, 3, 3]
+pbc:          [B, 3]
+flow_time:    [B, 1]
+seed_type_id: [B, 1]
+```
 
-The collated output is a plain `dict[str, ...]` of NumPy arrays and
-lists, ready for conversion to PyTorch tensors or PyG `Data` objects.
+Models broadcast graph-level conditions with `batch` and rebuild periodic
+neighbor graphs from the current `pos`; static edges are not stored as a data
+contract.
+
+Training accepts a positive integer batch size or `full`.  `full` means
+all event-init flow items in one epoch are evaluated in one optimizer
+update; `training.log` therefore records optimizer update steps rather
+than raw event-init sample counts.

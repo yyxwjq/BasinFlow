@@ -2,7 +2,7 @@
 
 ## 1. Basin folder naming — `isdigit()` restriction
 
-**Status**: deferred.  **Affects**: `tools/eon2data.py:100`.
+**Status**: deferred.  **Affects**: `tools/eon_to_events.py:100`.
 
 Current behaviour: only integer-named folders (`0/`, `1/`, …) are
 recognised as basin directories.  A folder named `au_cluster_0/` is
@@ -28,8 +28,8 @@ becomes important.
 
 **Status**: decided (filename stem).  **Affects**: `raw_events.py`.
 
-Event id currently derives from the extxyz filename (`event_0.extxyz`
-→ `"event_0"`).  The `global_event` column in `basin_table.csv` is
+Event id currently derives from the event filename (`event_0.traj` or
+`event_0.extxyz` → `"event_0"`).  The `global_event` column in `basin_table.csv` is
 redundant with the filename suffix and is not read.
 
 If filenames ever diverge from the `event_<N>` convention (e.g. a user
@@ -59,24 +59,68 @@ tests are present for pairwise geometry labels.
 
 ---
 
-## 5. PyG `Data` bridge
+## 5. Direct PyG datasets
 
-**Status**: deferred.  **Affects**: `collate.py`.
+**Status**: done.  **Affects**: `data/pyg.py`.
 
-Collated batches are plain dicts.  `AGENTS.md` says "Prefer PyTorch
-Geometric-style graph data."  A `dict_to_pyg_data()` converter or
-direct PyG output from collate should be added when PyTorch Geometric
-enters the dependency list (Stage 3).
+`EventFlowDataset` and `BasinDataset` emit `EventData` objects directly.
+The former NumPy pairwise-collation bridge has been removed from the
+delivery path.
 
 ---
 
 ## 6. JSON/YAML metadata persistence
 
-**Status**: missing.  **Affects**: `dataset.py`, workflow scripts.
+**Status**: minimally done.  **Affects**: `dataset.py`, workflow scripts.
 
-No utilities exist to save/load split assignments, basin descriptions,
-or dataset manifests.  `split_basins()` results are lost when the
-process exits.
+`BasinSplit.save()` and `BasinSplit.load()` persist ordered
+train/validation/test basin ids and the split seed as JSON.  This is enough
+to reproduce current basin splits.
 
-Needed before benchmark comparisons require exact split reproduction
-(Stage 4).
+Still missing: richer dataset manifests, basin descriptions, experiment
+summaries, and model/sampling metadata.  These remain needed before full
+benchmark comparisons require exact experiment reproduction (Stage 5).
+
+---
+
+## 7. Active prior versus active label leakage
+
+**Status**: fixed at the Stage 3 flow boundary.  **Affects**:
+`flow/targets.py`, `models/egnn_product_flow.py`, `sampling/candidate_sampler.py`.
+
+Earlier Stage 3 batches used `active_mask` both as a model input and as
+the supervised active-head label.  That made training/inference semantics
+ambiguous because true event active labels are unavailable during
+basin-level sampling.
+
+Current behavior:
+
+- `active_prior` is the model input condition from the seed.
+- `target_active_mask` is the supervised label used only by losses.
+- `CandidateSampler` builds inference batches with `active_prior` and no
+  target active labels.
+
+---
+
+## 8. Stage 3 initialization/proposal quality gap
+
+**Status**: open, now measurable.  **Affects**:
+`examples/train_product_flow.py`, `examples/sample_product_flow.py`,
+`sampling/candidate_sampler.py`, `benchmark/product_flow_quality.py`.
+
+The Stage 3 EGNN can now be evaluated separately in two modes:
+
+- pairwise product-flow rollout RMSD on train/val/test splits.
+- basin-level candidate recall/RMSD from the inference sampler.
+
+This separates two failure modes:
+
+- poor `R + initialization -> P` flow fitting.
+- poor basin-level initialization/proposal coverage.
+
+The current Au quality run shows the second problem clearly: pairwise
+test rollout RMSD is measurable below the raw basin sampling RMSD, while
+basin-level recall remains zero with only two fixed initialization generators per
+basin.  The next Stage 3 improvement should therefore prioritize richer
+or learned basin-level initialization/event-channel proposal before moving to
+Stage 4 TS flow.

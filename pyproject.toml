@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "fscgp"
+name = "basinflow"
 version = "0.1.0"
 description = "Geometry and data core for BasinFlow event proposal workflows"
 requires-python = ">=3.10"
@@ -18,10 +18,24 @@ models = [
   "torch",
   "torch-geometric",
 ]
+dev = [
+  "pre-commit",
+  "ruff",
+]
+
+[project.scripts]
+basinflow = "basinflow.cli:main"
 
 [tool.setuptools.packages.find]
-where = ["src"]
+include = ["basinflow*"]
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["."]
 testpaths = ["tests"]
+
+# Toolchain mirroring the liflow conventions. Neither ruff nor pre-commit is
+# installed in this environment yet; enable them with
+#   pip install -e ".[dev]" && pre-commit install
+[tool.ruff]
+extend-include = ["*.ipynb"]
+exclude = ["runs", "notebooks"]
