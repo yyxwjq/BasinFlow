@@ -1,5 +1,16 @@
 # ReactOT/MolGEN 协议核查及下一轮运行
 
+> **2026-09-15 更新（`docs/27_data_layer_rewrite_plan.md`）**：本文是当时状态的审计/报告，作为历史记录保留，未回改。其中的 `StructureRecord`/`EventRecord`/`BasinRecord`/`CandidateRecord`、`load_data_partitions`、`active_threshold`/`active_weight`/`direction_weight` 等接口已在数据层重写中删除或改名；当前契约见 `docs/03_data_schema.md` 与 `docs/21_core_api.md`。
+>
+> **2026-09-16 更新（事件级划分）**：basin 层已删除（见 `docs/21_core_api.md` 第八节）。本文提到的
+> `split_manifest.json` 与 `basin_table.csv` 都不再产生，划分改为事件目录内的 `split.csv`。因此
+> **§101–§108 的一次性准备命令（`tools/prepare_transition1x_explicit_split.py`）已随工具删除**；
+> 等价做法是用 `tools/transition1x_to_events.py --split-file` 给出 `{train/val/test: 源索引}`，
+> 分区直接写成子目录。新划分的种子由用户在 `[data] auto_split` + `[split] seed` 里给定，
+> 因此**本文的 9000/536/537 是一份可复现的既有划分，不是参考实现的划分**
+> （`reference_split: false`；参考实现 OAReactDiff 实际把 9000+1073 全部用于训练，
+> `use_ind` 未被其训练配置使用）。
+
 ## 当前结论
 
 用户确认自定义 Transition1x 分区为 train=9000、val=536、test=537，保留多片段。

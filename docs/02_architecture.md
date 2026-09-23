@@ -74,7 +74,7 @@ EventCatalog
 ### EventCatalog and PyG Views
 
 `EventCatalog` is the read-only domain boundary.  It owns
-`StructureRecord`, `EventRecord`, and `BasinRecord`, validates their
+`Structure`, `Event`, and the basin index, validates their
 cross-references and frame consistency, and supports basin-only subsets and
 reproducible `BasinSplit` manifests.  It does not tensorize data, sample flow
 times, construct graphs, or choose seeds.
@@ -96,7 +96,7 @@ event_*.extxyz
 
 Each event file preserves reactant, product, and optional transition-state
 frames.  `move_mask` becomes only the `movable_mask` constraint.  Activity
-supervision uses an explicit `EventRecord.active_atoms` annotation when
+supervision uses the MIC displacement from `event_target(event)`; where a curated
 available, otherwise it is derived from MIC reactant-to-product displacement.
 
 ### EventSeed and SeedGenerator

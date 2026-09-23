@@ -1,188 +1,65 @@
-# Project Agent Guide
+# AGENTS.md
 
-## Project Goal
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
 
-This project develops a learning-assisted KMC event proposal framework for KMC/AKMC rate table construction.
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
 
-The target workflow is:
+## 1. Think Before Coding
 
-```text
-reactant basin -> event proposals -> candidate products -> relaxation -> clustering -> saddle validation -> event library -> KMC export
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
 ```
 
-The model is not expected to prove that an event is valid by itself. It proposes active atoms, escape directions, candidate product structures, and validation priorities that reduce the number of expensive blind saddle-search calls.
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
 
-The current research direction is:
+---
 
-```text
-seed-conditioned basin-level event proposal for AKMC:
-reactant basin -> multiple product + TS + direction candidates
-```
-
-The main novelty should be framed as `R_basin -> {P_k, TS_k, active_atoms_k, direction_k}` rather than only `R + P -> TS`.
-
-## Scientific Scope
-
-Primary objective:
-
-- Given a reactant structure or reactant basin, propose multiple candidate KMC escape events.
-
-An event proposal may include active atoms, an event direction or displacement field, a candidate product/end-state structure, an optional transition-state guess, and an optional barrier/rate/uncertainty or validation-priority score.
-
-Primary application:
-
-- Build or expand reaction/event tables for KMC and adaptive KMC simulations.
-
-Initial MVP:
-
-- Benchmark event proposal on the initial EON-style Au event dataset and later broaden to small molecular and periodic systems.
-- Evaluate candidates after relaxation and clustering.
-- Measure event recall and computational cost reduction relative to brute-force saddle-search baselines.
-
-Later extensions:
-
-- Transition-state validation.
-- Event-library reuse.
-- Adaptive KMC integration.
-- Active-learning loops with uncertainty and fallback to conventional saddle search.
-
-## Non-Goals
-
-Do not frame the first implementation as:
-
-- A general crystal generator.
-- A complete replacement for AKMC.
-- A model that directly guarantees transition states or barriers.
-- A one-to-one reactant-to-product predictor only.
-- A pure product-coordinate generator with no active-region or event-direction semantics.
-- A baseline-first project centered on random local displacement, hop-like, or site-specific heuristic proposers.
-- A BasinFlow-side runtime wrapper around EON during early model training.
-
-Pairwise training can be used, but evaluation must be basin-level.
-
-## Reference Projects
-
-Reference projects are kept outside this repository. Do not copy entire reference repositories into this project.
-
-Known reference paths:
-
-- `/Users/wx/Desktop/yyxwjq/OAReactDiff`
-- `/Users/wx/Desktop/yyxwjq/akmc-product-generation`
-- `/Users/wx/Desktop/yyxwjq/AdsorbDiff`
-- `/Users/wx/Desktop/yyxwjq/liflow`
-- `/Users/wx/Desktop/yyxwjq/trajcast`
-- `/Users/wx/Desktop/yyxwjq/AMDEN-code`
-- `/Users/wx/Desktop/yyxwjq/eon`
-
-Important React-OT notes and PDFs are currently outside the repository:
-
-- `/Users/wx/Downloads/同步空间/obisidan/zotero/akmcgc-reference`
-- `/Users/wx/Downloads/同步空间/MyZotero/akmcgc`
-
-Use these repositories for design inspection and selective porting only. If code is copied later, copy the minimum necessary module, preserve attribution, and document why it was imported.
-
-## Design Principles
-
-- Treat candidate generation and physical validation as separate stages.
-- Treat product generation as one part of event proposal, not the whole project.
-- Treat transition-state generation as a later `R/P -> TS` module that can use React-OT-style flow matching once product candidates exist.
-- Use dynamic periodic graph construction during sampling for crystal systems.
-- Support both molecules and periodic crystals through a shared structure interface.
-- Organize data at basin level, even if training samples pairwise events.
-- Prefer physically interpretable proposal targets: active atoms, event directions, product candidates, and validation priority.
-- Represent an `EventSeed` as scalar conditions, equivariant/vector conditions, and a flow initial geometry, not only as metadata.
-- Avoid global rewrites of imported framework ideas; implement clean project-local interfaces.
-- Keep geometry, datasets, model, sampling, relaxation, clustering, validation, and KMC export as separate modules.
-- Keep EON AKMC orchestration, saddle refinement, minimization, barriers, prefactors, and runtime scheduling inside EON. BasinFlow should export proposals for a later EON-side `ml_proposal` integration.
-
-## Current Development Order
-
-Follow `docs/05_development_plan.md` as the source of truth. The current staged direction is:
-
-```text
-Stage 1: Geometry and Data Core
-Stage 2: EON-style R/P/TS Event Dataset Integration
-Stage 3: Seed-Conditioned Product/Event Flow
-Stage 4: React-OT-Style TS Flow
-Stage 5: Basin-Level Event Proposal Benchmark
-Stage 6: EON-Side ML Suggestion Integration
-Stage 7: Event Library and Adaptive KMC Extensions
-```
-
-Do not resurrect the old Stage 2 heuristic-baseline plan as the main route. Gaussian/local perturbations, active-region perturbations, hop-like moves, and similar rules may be seed types or smoke-test utilities, but they should not define the research contribution.
-
-## Expected Engineering Style
-
-- Prefer PyTorch and PyTorch Geometric-style graph data where possible.
-- Use ASE-compatible structure I/O for periodic systems.
-- Store event/basin metadata in structured formats such as JSON/YAML plus trajectory files.
-- Write tests for geometry invariance, PBC neighbor construction, dataset collation, and candidate clustering before large model training.
-- Keep model code independent from workflow orchestration code.
-
-## Agent Instructions
-
-Before implementing new code:
-
-1. Read `docs/00_project_vision.md`.
-2. Read `docs/02_architecture.md`.
-3. Read `docs/03_data_schema.md`.
-4. Read `docs/08_technical_stack.md`.
-5. Read `docs/10_research_direction_memory.md`.
-6. If implementing a module inspired by a reference project, read `docs/09_reference_code_notes.md`.
-7. Check `docs/05_development_plan.md` for the current stage.
-8. If using ideas from a reference project, update `docs/06_reference_frameworks.md` and `docs/09_reference_code_notes.md`.
-
-Do not assume one reactant has only one correct product. For this project, one reactant basin may have many valid events, and unknown generated events require validation rather than immediate rejection.
-
-## Behavioral Coding Rules
-
-These rules reduce common agent mistakes. They complement the project-specific scientific rules above and do not override them.
-
-### Think Before Coding
-
-Before implementing, state the working assumption when it affects scientific framing, train/inference semantics, data leakage, benchmark validity, public interfaces, or destructive edits.
-
-If ambiguity affects any of those areas, stop and ask. For low-risk local choices already implied by docs or surrounding code, state the assumption and proceed.
-
-For model, training, sampling, or benchmark changes, explicitly identify whether the path is pairwise training, basin-level inference, oracle diagnostic, no-relaxation geometric recall, relaxed product recall, or saddle-validated event recall.
-
-### Simplicity First
-
-Use the minimum code that solves the current staged task. Do not add speculative features, broad abstractions, or new dependencies.
-
-Configuration is justified only when it supports reproducible experiments, dataset paths, split manifests, model/sampling hyperparameters, runtime device selection, or benchmark reports.
-
-Do not add defensive code for impossible internal states, but do validate user-facing scientific data contracts: event frame counts, atom counts, masks, PBC/cell shapes, split manifests, and train/inference inputs.
-
-### Surgical Changes
-
-Touch only files required by the task. Do not refactor adjacent code, rename concepts, or update unrelated docs.
-
-Preserve current project contracts:
-
-- `movable_mask` is canonical; fixed atoms are represented as `~movable_mask`.
-- `active_prior` is model input; `target_active_mask` is supervision.
-- Product-displacement/oracle initialization is diagnostic only, not a basin-level inference input.
-- No-relaxation recall is geometric candidate recall, not validated KMC event recall.
-
-Do not revert or clean unrelated uncommitted work unless explicitly requested.
-
-### Goal-Driven Execution
-
-For each non-trivial task, define success criteria before editing.
-
-For code behavior, prefer targeted tests. For examples or CLIs, run a smoke command. For training/sampling changes, verify expected artifacts such as `checkpoint.pt`, `split_manifest.json`, `config.resolved.ini`, `training.log`, and metric JSON. For scientific claims, report exact metric definitions and whether relaxation or saddle validation was used.
-
-Stage 3 training/sampling changes must state:
-
-- dataset or fixture used;
-- whether splits are newly generated or loaded;
-- whether evaluation is pairwise rollout, basin-level sampling, no-relaxation recall, or validated event recall;
-- whether oracle inputs are prohibited or intentionally used for diagnostics;
-- whether training target and sampling protocol are semantically aligned.
-
-### Stage Boundary
-
-Follow `docs/05_development_plan.md` and the current stage in `README.md`.
-
-At the current Stage 3 Phase 2 prototype stage, prioritize proposal quality, initialization coverage, train/sampling consistency, benchmark reproducibility, and adding a second benchmark dataset. Do not start Stage 4 TS flow, Stage 5 physical validation, or Stage 6 EON integration unless explicitly requested.
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

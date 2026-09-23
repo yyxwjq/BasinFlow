@@ -40,7 +40,7 @@ def events_dir(tmp_path: Path) -> Path:
 def _config(tmp_path: Path, events_dir: Path, *, source_scale: float, time_distribution: str,
             flow_time: float | None, output_name: str) -> Path:
     parser = configparser.ConfigParser()
-    parser["data"] = {"events_dir": str(events_dir), "active_threshold": "0.1"}
+    parser["data"] = {"events_dir": str(events_dir), "auto_split": "true"}
     parser["output"] = {"output_dir": str(tmp_path / output_name), "log_to_stdout": "false"}
     parser["split"] = {"train": "0.5", "val": "0.5", "test": "0.0", "seed": "7"}
     parser["model"] = {
@@ -54,10 +54,11 @@ def _config(tmp_path: Path, events_dir: Path, *, source_scale: float, time_distr
     parser["init"] = init
     parser["training"] = {"epochs": "2", "lr": "0.001", "batch_size": "2",
                           "save_each_epoch": "true", "seed": "7"}
-    parser["evaluation"] = {"eval_num_steps": "3", "trials_per_basin": "2", "sampling_seed": "5",
+    # ``eval_num_steps`` is the cap on accepted+rejected adaptive steps, so it
+    # needs headroom; the sampler no longer takes a fixed number of Euler steps.
+    parser["evaluation"] = {"eval_num_steps": "64", "trials_per_event": "2", "sampling_seed": "5",
                             "split": "val"}
-    parser["loss"] = {"velocity_weight": "1.0", "active_weight": "0.0", "direction_weight": "0.0",
-                      "active_pos_weight": "1.0", "norm": "l1"}
+    parser["loss"] = {"velocity_weight": "1.0", "norm": "l1"}
     parser["runtime"] = {"device": "cpu", "cpu_threads": "1"}
     path = tmp_path / f"{output_name}.ini"
     with path.open("w", encoding="utf-8") as file:
@@ -74,7 +75,7 @@ def test_ts_workflow_trains_a_field_and_scores_it_with_an_ode(tmp_path, events_d
 
     evaluation = report["evaluation"]
     assert evaluation["evaluation_protocol"] == "transition_state_flow_ode"
-    assert evaluation["num_steps"] == 3
+    assert evaluation["num_steps"] == 64
     assert evaluation["time_distribution"] == "beta"
     # Two trials means two *different* source draws, which is what makes
     # best-of-N meaningful rather than a repeat of one deterministic output.
@@ -108,12 +109,15 @@ def test_scorer_records_the_step_and_trial_regime(tmp_path, events_dir):
     run_transition1x_ts(config)
     checkpoint = sorted((tmp_path / "scored_run" / "epoch_checkpoints").glob("epoch_*.pt"))[-1]
 
-    record = _score(tmp_path / "scored_run", checkpoint, tmp_path / "score_1step", "val", None,
-                    steps=1, trials=3)
+    record = _score(tmp_path / "scored_run", checkpoint, tmp_path / "score_adaptive", "val", None,
+                    steps=32, trials=3)
 
-    assert record["ode_steps"] == 1
+    # ``steps`` is the number of saved points on the t grid (MolGEN's
+    # ``--inference_steps``); the solver picks its own step sizes.
+    assert record["ode_steps"] == 32
+    assert record["integrator"] == "dopri5"
     assert record["trials"] == 3
     # Averaging over several source draws cannot be worse than the best single
     # draw, so the best-of-N median is bounded by the per-trial median.
     assert record["best_of_trials_median"] <= record["aligned_median"] + 1e-9
-    assert (tmp_path / "score_1step" / "sampling" / "summary.json").is_file()
+    assert (tmp_path / "score_adaptive" / "sampling" / "summary.json").is_file()

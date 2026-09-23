@@ -1,6 +1,6 @@
-"""End-to-end ``R_basin -> {P, TS}`` chain: does a predicted product still give a TS?
+"""End-to-end ``R_event -> {P, TS}`` chain: does a predicted product still give a TS?
 
-The project's contract is that a reactant basin alone yields a product *and* a
+The project's contract is that a reactant alone yields a product *and* a
 transition state. The two models are trained separately, so the open question is
 how much the product error costs the downstream transition state. This tool
 answers it on one split with four arms, all scored against the recorded
@@ -34,9 +34,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data.partitions import load_data_partitions
-from basinflow.data.pyg import EventFlowDataset, TransitionStateDataset
-from basinflow.data.records import StructureRecord
+from basinflow.data import (EventFlowDataset, Structure, TransitionStateDataset,
+                            event_target, load_events, resolve_split, select_events)
 from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd
 from basinflow.geometry.bonds import bond_adjacency, preserves_fragments
 from basinflow.models import FlowLossWeights, flow_loss
@@ -92,24 +91,23 @@ def main() -> int:
     rp_model, rp_config = _load_model(args.rp_run_dir, rp_ckpt, RP_REQUIRED)
     ts_model, ts_config = _load_model(args.ts_run_dir, ts_ckpt, TS_REQUIRED)
 
-    catalog, split, _ = load_data_partitions(
-        {"train_events_dir": str(args.data_dir / "train"),
-         "val_events_dir": str(args.data_dir / "val"),
-         "test_events_dir": str(args.data_dir / "test")}, {})
+    # Accept either a dataset root (``<root>/events``) or the events directory itself.
+    events_dir = args.data_dir / "events" if (args.data_dir / "events").is_dir() else args.data_dir
+    catalog = load_events(events_dir)
+    split, _ = resolve_split(events_dir, catalog, auto=False)
     part = split.select(catalog, args.split)
-    ids = list(part.basin_ids)
+    ids = list(part.event_ids)
     if args.single_event_only:
-        ids = [bid for bid in ids if preserves_fragments(
-            bond_adjacency(part.structures[part.basins[bid].reactant_structure_id].positions,
-                           part.structures[part.basins[bid].reactant_structure_id].atomic_numbers,
-                           part.structures[part.basins[bid].reactant_structure_id].cell,
-                           part.structures[part.basins[bid].reactant_structure_id].pbc),
-            bond_adjacency(part.event_target(part.basins[bid].known_event_ids[0]).target_positions,
-                           part.structures[part.basins[bid].reactant_structure_id].atomic_numbers,
-                           part.structures[part.basins[bid].reactant_structure_id].cell,
-                           part.structures[part.basins[bid].reactant_structure_id].pbc))]
+        def _local(event_id):
+            reactant = part.events[event_id].reactant
+            reference = bond_adjacency(reactant.positions, reactant.atomic_numbers,
+                                       reactant.cell, reactant.pbc)
+            target = event_target(part.events[event_id])
+            return preserves_fragments(reference, bond_adjacency(
+                target.target_positions, reactant.atomic_numbers, reactant.cell, reactant.pbc))
+        ids = [event_id for event_id in ids if _local(event_id)]
     ids = ids[: args.num_events]
-    scoped = catalog.subset(ids)
+    scoped = select_events(catalog, ids)
 
     # Stage one: reactant -> predicted product, oracle bond-change condition.
     rp_dataset = EventFlowDataset(scoped, [ZeroInit()], flow_time=0.0, seed=0,
@@ -124,7 +122,7 @@ def main() -> int:
                 count = int((batch.batch == graph).sum())
                 sl = slice(start, start + count); start += count
                 predicted[batch.event_id[graph]] = pos[sl].numpy()
-    rp_target = {event_id: scoped.event_target(event_id).target_positions for event_id in scoped.event_ids}
+    rp_target = {event_id: event_target(scoped.events[event_id]).target_positions for event_id in scoped.event_ids}
 
     # Stage two: the recorded transition-state model, fed either endpoint pair.
     ts_dataset = TransitionStateDataset(scoped, flow_time=0.0)
@@ -157,14 +155,14 @@ def main() -> int:
     ts_from_pred = ts_rollout(predicted)
 
     def frame(name, positions, reference_structure):
-        return StructureRecord(name, list(reference_structure.species), positions,
-                               reference_structure.cell.copy(), reference_structure.pbc.copy(),
-                               reference_structure.movable_mask.copy())
+        return Structure(list(reference_structure.species), positions,
+                         reference_structure.cell.copy(), reference_structure.pbc.copy(),
+                         reference_structure.movable_mask.copy())
 
     arms = {key: [] for key in ("midpoint_true", "midpoint_predicted", "ts_true_endpoints", "ts_predicted_endpoints")}
     product_errors = []
     for event_id in scoped.event_ids:
-        target = scoped.event_target(event_id)
+        target = event_target(scoped.events[event_id])
         reactant = target.reactant
         state = target.transition_state.positions
         ref = frame("r", reactant.positions, reactant)
@@ -180,7 +178,7 @@ def main() -> int:
             arms[key].append(kabsch_aligned_rmsd(frame("c", positions, reactant), truth, ref))
 
     report = {
-        "task": "reactant_basin_to_product_and_transition_state",
+        "task": "reactant_to_product_and_transition_state",
         "split": args.split,
         "num_events": len(scoped.event_ids),
         "single_event_only": bool(args.single_event_only),

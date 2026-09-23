@@ -14,10 +14,8 @@ def normalize_cell(cell: Iterable[Iterable[float]] | None) -> np.ndarray:
     if cell is None:
         return np.zeros((3, 3), dtype=float)
     array = np.asarray(cell, dtype=float)
-    if array.shape == (3,):
-        array = np.diag(array)
     if array.shape != (3, 3):
-        raise ValueError(f"cell must have shape (3, 3) or (3,), got {array.shape}")
+        raise ValueError(f"cell must have shape (3, 3), got {array.shape}")
     return array
 
 

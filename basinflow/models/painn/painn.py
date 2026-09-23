@@ -16,14 +16,18 @@ class DualPaiNN(nn.Module):
     Time is atom-level [N]. No source-noise or target fields are consumed.
     """
 
-    def __init__(self, num_features=128, num_radial_basis=32, num_layers=4, num_elements=119, r_max=5.0, time_dim=32, radial_basis="bessel", envelope="polynomial", stability_mode="scaled", bond_change_condition=False, bond_change_direction=False, endpoint_condition=False, endpoint_equivariant=False):
+    def __init__(self, num_features=128, num_radial_basis=32, num_layers=4, num_elements=119, r_max=5.0, time_dim=32, radial_basis="bessel", envelope="polynomial", stability_mode="scaled", bond_change_condition=False, bond_change_direction=False, endpoint_condition=False, endpoint_equivariant=False, time_scale=1.0,
+                 time_per_layer=False):
         super().__init__()
         if stability_mode not in {"scaled", "bounded", "none"}:
             raise ValueError("stability_mode must be scaled, bounded or none")
         if num_features < 2 or num_layers < 1 or num_elements < 2:
             raise ValueError("features/elements must be at least two and layers positive")
         self.atom_embedding = nn.Embedding(num_elements, num_features)
-        self.time_embedding = GaussianFourierBasis(time_dim)
+        # ``time_scale`` widens the Fourier frequencies. The flow field's time
+        # dependence has to survive several message-passing layers, and the
+        # default scale proved too weak to fit even a single trajectory (docs/26).
+        self.time_embedding = GaussianFourierBasis(time_dim, scale=float(time_scale))
         self.scalar_input = nn.Sequential(nn.Linear(num_features + time_dim + 2, num_features), nn.SiLU(), nn.Linear(num_features, num_features))
         self.vector_input = nn.Linear(1, num_features, bias=False)
         if bond_change_direction and not bond_change_condition:
@@ -41,10 +45,14 @@ class DualPaiNN(nn.Module):
             raise ValueError("endpoint_equivariant requires endpoint_condition")
         self.endpoint_condition = bool(endpoint_condition)
         self.endpoint_equivariant = bool(endpoint_equivariant)
+        # ``time_per_layer`` gives every message block its own view of the clock,
+        # which is what a field with genuine time dependence needs (docs/27).
+        gate_features = time_dim if time_per_layer else 0
         self.messages = nn.ModuleList([DualMessageBlock(num_features, num_radial_basis, stability_mode,
                                                        self.bond_change_condition,
                                                        self.endpoint_condition,
-                                                       self.endpoint_equivariant) for _ in range(num_layers)])
+                                                       self.endpoint_equivariant,
+                                                       gate_features) for _ in range(num_layers)])
         self.updates = nn.ModuleList([UpdateBlock(num_features, stability_mode) for _ in range(num_layers)])
         self.output = GatedEquivariantBlock(num_features, stability_mode)
 
@@ -78,7 +86,8 @@ class DualPaiNN(nn.Module):
             endpoint_radial, endpoint_cutoff = self.radial(endpoint_length)
             endpoint = (endpoint_radial, endpoint_cutoff, endpoint_unit)
         conditions = data.get("node_conditions", current.new_zeros((len(current), 2)))
-        scalar = self.scalar_input(torch.cat([self.atom_embedding(elements), self.time_embedding(data["time"]), conditions], dim=-1))
+        time_embedding = self.time_embedding(data["time"])
+        scalar = self.scalar_input(torch.cat([self.atom_embedding(elements), time_embedding, conditions], dim=-1))
         vector = self.vector_input((current - reference)[:, :, None])
         bond_change = None
         if self.bond_change_condition:
@@ -93,7 +102,7 @@ class DualPaiNN(nn.Module):
                     _bond_change_direction(reference, receiver, sender, bond_change)[:, :, None]
                 )
         for message, update in zip(self.messages, self.updates):
-            scalar, vector = message(scalar, vector, reference_radial, current_radial, reference_cutoff, current_cutoff, reference_unit, current_unit, data["edge_index"], bond_change, endpoint)
+            scalar, vector = message(scalar, vector, reference_radial, current_radial, reference_cutoff, current_cutoff, reference_unit, current_unit, data["edge_index"], bond_change, endpoint, time_embedding)
             scalar, vector = update(scalar, vector)
         return {"velocity": self.output(scalar, vector), "hidden": scalar}
 

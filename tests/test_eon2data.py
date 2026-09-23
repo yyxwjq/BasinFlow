@@ -36,11 +36,11 @@ def test_process_basin_writes_two_frame_event_when_saddle_is_missing(tmp_path, m
     _write_con(procdata / "reactant_0.con", 0.0)
     _write_con(procdata / "product_0.con", 0.2)
 
-    records, next_counter = process_basin(0, 0, output_dir, output_format="extxyz")
+    records, next_counter = process_basin(0, 0, output_dir, output_format="traj")
 
-    frames = read(output_dir / "event_0.extxyz", index=":")
+    frames = read(output_dir / "event_0.traj", index=":")
     assert next_counter == 1
-    assert records == [{"global_event": 0, "local_event": 0, "basin": 0, "file": "event_0.extxyz"}]
+    assert records == [{"event_id": 0, "state": 0, "process": 0, "file": "event_0.traj"}]
     assert len(frames) == 2
 
 
@@ -54,11 +54,11 @@ def test_process_basin_writes_three_frame_event_when_saddle_exists(tmp_path, mon
     _write_con(procdata / "product_0.con", 0.2)
     _write_con(procdata / "saddle_0.con", 0.1)
 
-    records, next_counter = process_basin(0, 0, output_dir, output_format="extxyz")
+    records, next_counter = process_basin(0, 0, output_dir, output_format="traj")
 
-    frames = read(output_dir / "event_0.extxyz", index=":")
+    frames = read(output_dir / "event_0.traj", index=":")
     assert next_counter == 1
-    assert records[0]["file"] == "event_0.extxyz"
+    assert records[0]["file"] == "event_0.traj"
     assert len(frames) == 3
 
 
@@ -75,7 +75,7 @@ def test_process_basin_can_write_traj_with_fixatoms_constraints(tmp_path, monkey
 
     frames = read(output_dir / "event_0.traj", index=":")
     assert next_counter == 1
-    assert records == [{"global_event": 0, "local_event": 0, "basin": 0, "file": "event_0.traj"}]
+    assert records == [{"event_id": 0, "state": 0, "process": 0, "file": "event_0.traj"}]
     assert len(frames) == 2
     assert frames[0].constraints
     assert frames[0].constraints[0].get_indices().tolist() == [0]

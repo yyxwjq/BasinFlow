@@ -67,10 +67,14 @@ EON-style directories rather than re-running the converter on the cluster:
   split_manifest.json, source_partitions.json, {train,val,test}_indices.json
 ```
 
-Because the three directories are explicit, `config.ini` must use
-`train_events_dir` / `val_events_dir` / `test_events_dir` and must not set
-`[split] manifest` — `load_data_partitions` rejects external directories
-combined with a manifest.
+The cluster copy must be the canonical single-directory layout: one `events/`
+directory (with one merged `basin_table.csv` carrying a `source_partition` column)
+plus the sibling `split_manifest.json`. `config.ini` therefore sets `[data]
+events_dir` and `[data] manifest`; the old `train_events_dir` / `val_events_dir` /
+`test_events_dir` keys no longer exist and are rejected as unknown keys.
+`tools/merge_event_partitions.py` converts an existing three-directory export
+(hard-linking the event files), and `.hpc/deploy_data.sh` now uploads the
+`*_merged` datasets.
 
 `config_ts.ini` needs a second copy of the same split carrying TS targets:
 
@@ -145,14 +149,19 @@ sample can be analysed by *how* it converged. The full val split at 40 trials is
 `time_distribution = fixed` (the legacy deterministic bridge) is mapped to a
 uniform grid for sampling, since a pinned-time model has no time law to draw.
 
-## 6. Backbone / loss-head constraint
+## 6. Backbone constraint
 
-`flow_loss` reads `active_logits` and `direction` whenever `active_weight` or
-`direction_weight` is non-zero, but only the EGNN backbone exposes those heads.
-Pairing `backend = painn` with a non-zero auxiliary weight raises
-`KeyError: 'active_logits'` — this is exactly how the first deployment attempt
-failed. Use `backend = egnn` for the auxiliary-head loss, or set both weights to
-`0.0` for `painn`; `config_ts.ini` takes the second route.
+Both backends expose exactly one head, `velocity`, and `basinflow.models.loss`
+optimises exactly one term, so any backend can be paired with any loss setting.
+The constraint that used to live here — PaiNN raising `KeyError: 'active_logits'`
+when an auxiliary weight was non-zero — is gone with the auxiliary heads. What
+still differs between the backends is graph acquisition: EGNN is a single-geometry
+model whose graph the *sampler* rebuilds every `graph_update_interval` steps
+(`builds_own_graph` is absent), while PaiNN rebuilds a dual-geometry graph inside
+every forward pass. That difference is deliberate and must not be unified. Both
+rebuild on *every* field evaluation, which is what an adaptive solver requires:
+its steps are neither uniform nor known ahead, so there is no step counter to
+cache a graph on.
 
 The TS flow has a second, sharper constraint: `flow_time` must stay unset when
 `time_distribution != "fixed"`. `TransitionStateDataset` rejects the combination,
@@ -211,8 +220,11 @@ Timing and sizing measured, not estimated: ~5 minutes/epoch (40 epochs ~3.2 h),
 
 ## 9. Local access helpers
 
-Kept out of version control in `.hpc/` (see `.gitignore`), because they embed
-the cluster password:
+Kept out of version control in `.hpc/` (see `.gitignore`). They read the cluster
+password from the `BASINFLOW_HPC_PW` environment variable, which is deliberately
+never stored in the repository — export it in your shell first
+(`export BASINFLOW_HPC_PW='...'`); the scripts abort with a clear error if it is
+unset:
 
 | Script | Purpose |
 |--------|---------|

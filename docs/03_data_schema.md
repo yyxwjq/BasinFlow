@@ -10,144 +10,113 @@ to the saddle-validation stage.
 
 ---
 
-## StructureRecord
+## Structure
 
-Represents one molecular or periodic structure.
+Represents one molecular or periodic frame. Five fields, nothing else.
 
 ```yaml
-structure_id: string
 species: [string]
 positions: float[N, 3]
-cell: float[3, 3] | null      # always normalized to (3,3); null → zero matrix
+cell: float[3, 3] | null      # always normalized to (3,3); null -> zero matrix
 pbc: bool[3]                   # always normalized to (3,)
-charge: int | null
-movable_mask: bool[N] | null   # True = atom may move; null → all atoms movable
-tags: int[N] | null
-energy: float | null
-forces: float[N, 3] | null
-metadata: object
+movable_mask: bool[N] | null   # True = atom may move; null -> all atoms movable
 ```
 
 Rules:
 
-- `cell` and `pbc` are **normalized on construction**: `cell` is always
-  a `(3, 3)` float array, `pbc` is always a `(3,)` bool array.
-- `movable_mask` is the **canonical per-atom movement mask** where
-  `True` marks atoms that may be displaced during generation, training,
-  and relaxation.  Missing masks default to all atoms movable.
-- Raw `move_mask` properties are treated as `True = movable` and are
-  converted to `movable_mask` when reading ASE structures.  ASE
-  `FixAtoms` constraints and legacy `constraints` inputs are accepted as
-  compatibility paths and converted to `movable_mask` (`False` for fixed
-  atoms).  Core APIs should not expose a separate `fixed_mask`; use
-  `~movable_mask` when fixed atoms are needed locally.
-- `source_file` is stored in `metadata["source_file"]`, not as a
-  top-level field.
-- `spin` is deferred to `metadata` for future use.
+- `cell` and `pbc` are **normalized on construction**: `cell` is always a
+  `(3, 3)` float array, `pbc` is always a `(3,)` bool array. Molecular data
+  carries a zero matrix and an all-`False` vector; the fields are never omitted,
+  because `pbc` -- not a nonzero cell -- decides periodic behavior.
+- `movable_mask` is a **given constraint**, not a learning target: an EON
+  `move_mask`, ASE `FixAtoms`, or "everything moves" by default. Raw `move_mask`
+  is treated as `True = movable`; `FixAtoms` is converted to `movable_mask`
+  (`False` for fixed atoms). Disagreement between the two is an error rather
+  than a silent precedence. Use `~movable_mask` when fixed atoms are needed.
+- There is **no** `structure_id`, `metadata`, `charge`, `energy`, `forces`,
+  `tags` or `constraints`: a `Structure` is geometry plus its movement
+  constraint. Energy and forces are not consumed by any production path, and the
+  event-level `metadata` lives on `Event` (see below).
+- `to_ase()` rebuilds `FixAtoms` from `~movable_mask`, so an ASE-driven
+  relaxation keeps fixed atoms fixed without a second constraint field.
 
 ---
 
-## EventRecord
+## Event
 
-Represents a known event from one reactant basin to one product basin.
+Represents one known event from one reactant basin to one product basin.
+The three frames are **inlined**, not referenced through a structure registry.
 
 ```yaml
 event_id: string
-reactant_structure_id: string
-product_structure_id: string
 basin_id: string
-transition_state_structure_id: string | null
-atom_mapping: [int] | null
-active_atoms: [int] | null
-event_direction: float[N, 3] | null
-validation_status: string       # see recommended values below
+reactant: Structure
+product: Structure
+transition_state: Structure | null
 metadata: object
 ```
 
-Recommended `validation_status` values:
+`Event.__post_init__` validates the invariant that the three frames agree on
+atom count, species order, cell and `pbc`. There is no `atom_mapping`,
+`active_atoms`, `event_direction` or `validation_status`: the first was never
+read, and the last three are either derived or owned by the stage that produces
+them. Barrier, rate, prefactor and `delta_e` remain out of scope (Stage 5/6).
 
-- `known_valid`
-- `generated_unvalidated`
-- `relaxed_candidate`
-- `saddle_validated`
-- `invalid`
-- `duplicate`
-
-### Derived labels
-
-`active_atoms` and `event_direction` are **derived automatically** from
-reactant/product coordinate pairs via MIC displacement when loading
-events.  They can also be set manually for curated datasets:
+### The one supervised quantity: `event_target(event)`
 
 ```text
-displacement_i = MIC(product_i - reactant_i)
-active_i       = norm(displacement_i) > threshold
-direction_i    = normalize(displacement_i) for active atoms
+displacement     = MIC(product - reactant)
+target_positions = reactant + displacement      # the lifted endpoint
 ```
 
-### Fields deferred to later stages
+The lifted endpoint is the reaction coordinate's endpoint, not the recorded
+product geometry: for a periodic system the two differ by a lattice vector, and
+only the lifted one crosses the cell boundary without a discontinuity.
 
-Barrier, rate, temperature, prefactor, and `delta_e` are **not** stored
-on `EventRecord`.  They belong to the saddle-validation (Stage 5) and
-KMC-export (Stage 6) stages and will live on a separate `ValidatedEvent`
-record or in `metadata` when available.
+Active-atom labels and event directions are **not** produced. Both are functions
+of `displacement` (``active_i = norm(displacement_i) > threshold``,
+``direction_i = normalize(displacement_i)``), and a derived label shipped next to
+its source is only a second thing to keep in sync.
 
 ---
 
-## BasinRecord
-
-Groups all known events that originate from the same reactant basin.
+## Basin index
 
 ```yaml
-basin_id: string
-reactant_structure_id: string
-known_event_ids: [string]
-metadata: object
+basins: {basin_id: [event_id, ...]}
 ```
 
-`system_type` and `split` are **not** stored on `BasinRecord`:
+A basin is a plain mapping entry, not a record class: it has no state of its own.
+`EventCatalog.__post_init__` checks that every event names a known basin, that
+every listed event belongs to the basin that lists it, and that all events of one
+basin share a reactant (same species, cell, `pbc` and `movable_mask`) -- otherwise
+"the basin's reactant", which inference samples from, would be ambiguous.
 
-- `system_type` can be inferred from `reactant.pbc` (all-False =
-  molecule; any-True = periodic).
-- `split` is assigned at **training time** by a `BasinSplit`, which records
-  train/validation/test basin ids and the random seed.  `EventCatalog.subset()`
-  only accepts basin ids, preventing one basin's events from crossing splits.
+`basin_reactant(catalog, basin_id)` returns it.
+
+`system_type` is inferred from `reactant.pbc` (all-`False` = molecule, any-`True`
+= periodic). Partition membership is assigned at training time by a `BasinSplit`,
+which records train/validation/test basin ids and the seed. Selection is by whole
+basin only, so no event of a basin can cross a split.
 
 ---
 
-## CandidateRecord
+## Candidate (sampling layer, not a data-layer record)
 
-Stores generated candidates before and after relaxation (Stage 2+).
+`basinflow.sampling.Candidate` records one generated proposal:
 
 ```yaml
 candidate_id: string
-basin_id: string
-reactant_structure_id: string
-initial_seed_id: string
 generated_structure_id: string
-model_checkpoint: string
+seed_id: string
+seed_type: string
 sampling_config: object
-relaxed_structure_id: string | null
-cluster_id: string | null
-relaxation_config: object | null
-active_atom_scores: float[N] | null
-predicted_active_atoms: [int] | null
-event_direction: float[N, 3] | null
-priority_score: float | null
-uncertainty: float | null
-status: string
-metadata: object
 ```
 
-Recommended `status` values:
-
-- `generated`
-- `relaxed`
-- `clustered`
-- `matched_known_event`
-- `novel_candidate`
-- `saddle_validated`
-- `invalid`
+Relaxation status, clustering, scores and validation status belong to the stages
+that produce them; the earlier data-layer record carried fields for all of them
+that nothing ever wrote. Its `active_atom_scores`, `predicted_active_atoms` and
+`event_direction` are gone with the heads that filled them.
 
 ---
 
@@ -167,7 +136,7 @@ Path images are not stored in event files.
 ASE trajectory files (`*.traj`) are preferred for EON conversions because
 they preserve `FixAtoms` constraints.  Extxyz atom properties such as
 `move_mask` are parsed by ASE and converted to
-`StructureRecord.movable_mask` when extxyz is used.
+`Structure.movable_mask` when extxyz is used.
 
 ### Basin table (`basin_table.csv`)
 
@@ -179,8 +148,9 @@ global_event,local_event,basin,file
 1,1,0,event_1.extxyz
 ```
 
-The `file` and `basin` columns are consumed by `EventCatalog.from_eon_directory()`;
-other columns are informational.
+The `file` and `basin` columns are consumed by `load_events()`; other columns
+(e.g. `dataset_kind`, `source_index`, `source_partition`) are informational and
+land in `event.metadata`.
 
 ### Directory layout
 
@@ -196,21 +166,36 @@ events/
 
 ## Dataset Loading
 
-```python
-from basinflow.data import BasinSplit, EventCatalog
+One mode: an event directory, plus an optional split manifest.
 
-catalog = EventCatalog.from_eon_directory("path/to/events")
-split = BasinSplit.create(catalog, train=0.7, val=0.15, test=0.15, seed=42)
+```python
+from basinflow.data import find_split_manifest, load_events, load_split, split_basins
+
+catalog = load_events("path/to/events")
+manifest = find_split_manifest("path/to/events")     # <dir>/split_manifest.json or its parent
+split = load_split(manifest) if manifest else split_basins(catalog, seed=42)
 train_catalog = split.select(catalog, "train")
 ```
 
-`EventCatalog.from_eon_directory()` scans `event_*.extxyz` files and falls
-back to `event_*.traj`, preserves `basin_table.csv` order, and accepts only
-two-frame (R/P) or three-frame (R/P/TS) events.  The separate
-`tools/transition1x_to_events.py` writes this same event-directory contract from a
-Transition1x pickle.  It maps every selected reaction to a
-`transition1x:<source_index>` pseudo-basin; this source is for pairwise
+`load_events()` globs `event_*.traj` and `event_*.extxyz`, consumes
+`basin_table.csv` when present (preserving its row order and using its `basin`
+column), and accepts only two-frame (R/P) or three-frame (R/P/TS) events. Frame
+`info` wins over the caller's metadata, so a converted dataset keeps naming the
+pickle its `source_file` came from.
+
+An empty partition is legal data -- the 0910 dataset ships `test: []` -- but
+`split.select(catalog, "test")` raises on it rather than producing a silently
+empty dataset. A config that still carries a removed key is rejected by
+`basinflow.workflows.config.read_config`, so an old option cannot be silently
+dropped from an experiment.
+
+`tools/transition1x_to_events.py` writes this same event-directory contract from
+a Transition1x pickle, mapping every selected reaction to a
+`transition1x:<source_index>` pseudo-basin. This source is for pairwise
 no-relaxation geometry diagnostics, not a KMC basin benchmark.
+`tools/prepare_transition1x_explicit_split.py` writes one `events/` directory plus
+a sibling `split_manifest.json`, and `tools/merge_event_partitions.py` converts an
+older three-directory export into that layout.
 
 ---
 
@@ -221,12 +206,24 @@ no-relaxation geometry diagnostics, not a KMC basin benchmark.
 ```text
 EventData(z, pos=x_t, reactant_pos, source_pos, movable_mask, active_prior,
           seed_displacement, seed_direction, cell, pbc, flow_time, seed_type_id,
-          target_pos, target_velocity, target_active_mask, target_direction)
+          target_pos, target_velocity)
 ```
 
-`target_pos` is the MIC-unwrapped product geometry.  Fixed atoms have zero
-target velocity and target direction.  TS data remains in `EventCatalog` for
-the future R/P-to-TS Stage 4 view and is not zero-filled into Stage 3 batches.
+`pos` is the *current flow state* `x_t`, not a product geometry; the product is
+supervision only. `target_pos` is the MIC-lifted product geometry. Fixed atoms
+have zero target velocity. There is no `target_active_mask` or `target_direction`.
+
+**`TransitionStateDataset`** — `R + P -> TS` (mode B, `docs/23`):
+
+```text
+EventData(z, pos=x_t, reactant_pos, endpoint_pos, source_pos, movable_mask,
+          active_prior=all False, seed_displacement=0, seed_direction=0,
+          cell, pbc, flow_time, seed_type_id, target_pos, target_velocity)
+```
+
+Here the product is a **conditioning input** (`endpoint_pos`), because the task is
+defined to receive it; the TS is supervision. That is not the leak the same field
+would be in mode A, and the two views are separate classes so it stays visible.
 
 **`BasinDataset`** — target-free candidate inference:
 
@@ -236,9 +233,9 @@ EventData(z, pos=reactant_pos + seed_displacement, reactant_pos, source_pos,
           cell, pbc, flow_time, seed_type_id, basin_id)
 ```
 
-It contains no product coordinates, `target_*` labels, true event direction,
-or TS information.  Known events remain in the catalog for post-sampling
-benchmark matching only.
+It constructs no `target_*` field at all, so an oracle cannot reach the model even
+by accident. Known events remain in the catalog for post-sampling benchmark
+matching only.
 
 ---
 

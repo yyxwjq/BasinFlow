@@ -19,25 +19,38 @@ from basinflow.evaluation import (
     run_single_event_molecule_trials,
     write_loss_artifacts,
 )
-from basinflow.data.pyg import EventFlowDataset
-from basinflow.data.partitions import load_data_partitions
+from basinflow.data import EventFlowDataset, single_event_scope
+from basinflow.sampling.ode import DEFAULT_ATOL, DEFAULT_RTOL, DEFAULT_METHOD
+from basinflow.workflows.dataset import load_configured_dataset
 from basinflow.models import FlowLossWeights
 from basinflow.models.factory import build_model, model_cutoff, model_spec
-from basinflow.training import active_pos_weight, train_product_flow
+from basinflow.training import train_product_flow
 
 
 REQUIRED = {
-    "data": ("active_threshold",),
+    "data": ("events_dir",),
     "output": ("output_dir", "log_to_stdout"),
     "model": (),
     "init": ("types", "gaussian_scale"),
     "training": ("epochs", "lr", "batch_size"),
-    "loss": ("velocity_weight", "active_weight", "direction_weight", "active_pos_weight"),
+    "loss": ("velocity_weight",),
     "runtime": ("device", "cpu_threads"),
-    "evaluation": ("eval_num_steps", "eval_graph_update_interval", "trials_per_basin", "sampling_seed", "selection_seed"),
+    "evaluation": ("eval_num_steps", "trials_per_event", "sampling_seed", "selection_seed"),
 }
 
 
+
+
+def _record_solver(config, *, integrator: str, atol: float, rtol: float) -> None:
+    """Write the *effective* solver into the config that gets saved as the record.
+
+    The config only carries an ``integrator`` key when a run overrides the
+    default, so without this the resolved config could not say which solver
+    produced the numbers.
+    """
+    config["evaluation"]["integrator"] = str(integrator)
+    config["evaluation"]["solver_atol"] = str(atol)
+    config["evaluation"]["solver_rtol"] = str(rtol)
 
 
 def _device(torch, config):
@@ -72,49 +85,35 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
     if any((output_dir / name).exists() for name in ("training.log", "checkpoint.pt", "config.resolved.ini")):
         raise FileExistsError("output contains a prior run; use a new output directory, including for resume")
     output_dir.mkdir(parents=True, exist_ok=True)
-    catalog, split, data_sources = load_data_partitions(config["data"], split_config)
+    catalog, split, data_sources = load_configured_dataset(config, seed=seed)
     # ``single_event`` drops the dissociations whose product is a separated
     # fragment pair, so training and evaluation cover the same event class
     # (docs/22 section 二之二). It is recorded in data_sources either way.
     training_scope = config["data"].get("training_scope", "all").strip().lower()
     if training_scope not in {"all", "single_event"}:
         raise ValueError("training_scope must be 'all' or 'single_event'")
-    scope_filter = (lambda part: part.single_event_subset()) if training_scope == "single_event" else (lambda part: part)
-    manifest_path = data_sources.get("manifest", data_sources["mode"])
+    scope_filter = single_event_scope if training_scope == "single_event" else (lambda part: part)
     train_catalog = scope_filter(split.select(catalog, "train"))
     val_catalog = scope_filter(split.select(catalog, "val"))
-    test_catalog = scope_filter(split.select(catalog, "test"))
     evaluation_split = config["evaluation"].get("split", "test").strip().lower()
     if evaluation_split not in {"val", "test"}:
         raise ValueError("evaluation split must be val or test")
-    evaluation_catalog = val_catalog if evaluation_split == "val" else test_catalog
-    if not evaluation_catalog.basin_ids:
-        raise ValueError(f"evaluation partition {evaluation_split} is empty")
+    # Only the partition actually used is selected. An empty partition is legal
+    # data; selecting it would raise, and it must, rather than silently evaluating
+    # on nothing.
+    evaluation_catalog = (
+        val_catalog if evaluation_split == "val" else scope_filter(split.select(catalog, "test"))
+    )
     data_sources = {
         **data_sources,
         "training_scope": training_scope,
-        "num_basins_by_partition": {
-            name: len(part.basin_ids)
-            for name, part in (("train", train_catalog), ("val", val_catalog), ("test", test_catalog))
+        "num_events_by_partition": {
+            name: len(getattr(split, f"{name}_ids")) for name in ("train", "val", "test")
         },
     }
     (output_dir / "data_sources.json").write_text(json.dumps(data_sources, indent=2) + "\n")
-    manifest = {
-        "train": list(train_catalog.basin_ids),
-        "val": list(val_catalog.basin_ids),
-        "test": list(test_catalog.basin_ids),
-        "seed": split.seed,
-        "training_scope": training_scope,
-    }
-    (output_dir / "split_manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
-    active_threshold = config["data"].getfloat("active_threshold")
-    pos_weight_text = config["loss"]["active_pos_weight"].strip().lower()
-    pos_weight = active_pos_weight(train_catalog, active_threshold=active_threshold) if pos_weight_text == "auto" else float(pos_weight_text)
     loss_weights = FlowLossWeights(
         velocity=config["loss"].getfloat("velocity_weight"),
-        active=config["loss"].getfloat("active_weight"),
-        direction=config["loss"].getfloat("direction_weight"),
-        active_pos_weight=pos_weight,
         norm=config["loss"].get("norm", "mse").strip().lower(),
     )
     # Time sampling and prior scale are the two knobs that decide whether the
@@ -135,7 +134,6 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
     train_dataset = EventFlowDataset(
         train_catalog,
         init_generators(config, seed),
-        active_threshold=active_threshold,
         seed=seed,
         time_distribution=time_distribution,
         beta_alpha=beta_alpha,
@@ -144,7 +142,7 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
         bond_change_source=bond_change_source,
     )
     validation_dataset = EventFlowDataset(
-        val_catalog, init_generators(config, seed), active_threshold=active_threshold, seed=seed,
+        val_catalog, init_generators(config, seed), seed=seed,
         time_distribution=time_distribution, beta_alpha=beta_alpha,
         flow_time=flow_time,
         bond_change_condition=bond_change_condition,
@@ -179,8 +177,13 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
         resume_from=config["training"].get("resume_from", "").strip() or None,
     )
     (output_dir / "history.json").write_text(json.dumps(history, indent=2) + "\n")
-    config["loss"]["active_pos_weight_resolved"] = str(pos_weight)
     config["evaluation"]["evaluation_protocol"] = "single_event_pairwise_no_relaxation"
+    _record_solver(
+        config,
+        integrator=config["evaluation"].get("integrator", DEFAULT_METHOD).strip().lower(),
+        atol=config["evaluation"].getfloat("solver_atol", fallback=DEFAULT_ATOL),
+        rtol=config["evaluation"].getfloat("solver_rtol", fallback=DEFAULT_RTOL),
+    )
     with (output_dir / "config.resolved.ini").open("w", encoding="utf-8") as file:
         config.write(file)
     write_loss_artifacts(output_dir / "training.log", output_dir)
@@ -188,19 +191,19 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
         "model_backend": backend,
         "model_state_dict": model.state_dict(),
         "model_config": model_config,
-        "split_manifest": manifest,
+        "split": {
+            "train": list(train_catalog.event_ids),
+            "val": list(val_catalog.event_ids),
+            "test": list(split.test_ids),
+            "training_scope": training_scope,
+        },
         "history": history,
         "training_contract": "transition1x_pairwise_r_to_p_no_oracle",
         "evaluation_split": evaluation_split,
-        "split_source": manifest_path or "generated",
-        "training_config": {**dict(config["training"]), "active_threshold": active_threshold},
+        "split_source": data_sources.get("split_file") or "all_train",
+        "training_config": dict(config["training"]),
         "init_config": {"generators": [{"type": initializer.seed_type, "scale": config["init"].getfloat("gaussian_scale"), "random_seed": seed} for initializer in init_generators(config, seed)]},
-        "loss_weights": {
-            "velocity": loss_weights.velocity,
-            "active": loss_weights.active,
-            "direction": loss_weights.direction,
-            "active_pos_weight": loss_weights.active_pos_weight,
-        },
+        "loss_weights": {"velocity": loss_weights.velocity, "norm": loss_weights.norm},
     }
     torch.save(checkpoint, output_dir / "checkpoint.pt")
     sampling_summary = run_single_event_molecule_trials(
@@ -209,13 +212,14 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
         output_dir=output_dir,
         cutoff=model_cutoff(model),
         num_steps=config["evaluation"].getint("eval_num_steps"),
-        graph_update_interval=config["evaluation"].getint("eval_graph_update_interval"),
+        integrator=config["evaluation"].get("integrator", DEFAULT_METHOD).strip().lower(),
+        solver_atol=config["evaluation"].getfloat("solver_atol", fallback=DEFAULT_ATOL),
+        solver_rtol=config["evaluation"].getfloat("solver_rtol", fallback=DEFAULT_RTOL),
         gaussian_scale=config["init"].getfloat("gaussian_scale"),
-        trials_per_basin=config["evaluation"].getint("trials_per_basin"),
-        num_test_basins=config["evaluation"].getint("num_test_basins", fallback=None),
+        trials_per_event=config["evaluation"].getint("trials_per_event"),
+        num_test_events=config["evaluation"].getint("num_test_events", fallback=None),
         sampling_seed=config["evaluation"].getint("sampling_seed"),
         selection_seed=config["evaluation"].getint("selection_seed"),
-        active_threshold=active_threshold,
         device=device,
         bond_change_source=config["evaluation"].get("bond_change_source", "seed").strip().lower(),
     )
@@ -223,9 +227,12 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
         "dataset": {
             "kind": "transition1x_single_event_molecule",
             "num_events": len(catalog.event_ids),
-            "num_pseudo_basins": len(catalog.basin_ids),
         },
-        "split": {"train": len(train_catalog.basin_ids), "val": len(val_catalog.basin_ids), "test": len(test_catalog.basin_ids)},
+        "split": {
+            "train": len(train_catalog.event_ids),
+            "val": len(val_catalog.event_ids),
+            "test": len(split.test_ids),
+        },
         "training_contract": "pairwise_r_to_p_no_oracle",
         "training_scope": training_scope,
         "flow_time": flow_time,
@@ -235,7 +242,7 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
             "sampling_source": config["evaluation"].get("bond_change_source", "seed").strip().lower(),
         },
         "evaluation_split": evaluation_split,
-        "split_source": manifest_path or "generated",
+        "split_source": data_sources.get("split_file") or "all_train",
         "model_backend": backend,
         "model_config": model_config,
         "sampling": sampling_summary,
@@ -243,8 +250,8 @@ def run_transition1x(config_path: Path | str) -> dict[str, Any]:
         "saddle_validation": "not_run",
     }
     (output_dir / "eval_metrics.json").write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-    print(f"Dataset: {len(catalog.event_ids)} Transition1x events / pseudo-basins")
-    print(f"Split: {len(train_catalog.basin_ids)} train / {len(val_catalog.basin_ids)} val / {len(test_catalog.basin_ids)} test")
+    print(f"Dataset: {len(catalog.event_ids)} Transition1x events")
+    print(f"Split: {len(train_catalog.event_ids)} train / {len(val_catalog.event_ids)} val / {len(split.test_ids)} test")
     print(f"Final loss: {history[-1]['loss']:.6f}")
     print(f"Sampling trials: {sampling_summary['num_trials']}")
     print(f"Raw RMSD mean: {sampling_summary['raw_rmsd_angstrom']['mean']}")

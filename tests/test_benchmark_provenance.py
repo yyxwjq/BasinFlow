@@ -29,9 +29,9 @@ def test_provenance_captures_current_source_and_actual_logged_steps(tmp_path):
     artifacts = manifest["runs"][0]["artifacts"]
     assert artifacts["checkpoint.pt"]["sha256"] == hashlib.sha256((run_dir / "checkpoint.pt").read_bytes()).hexdigest()
     assert "generated.traj" not in artifacts
-    source = output / "source/basinflow/data/catalog.py"
+    source = output / "source/basinflow/data/events.py"
     assert source.is_file()
-    assert hashlib.sha256(source.read_bytes()).hexdigest() == manifest["source_files"]["basinflow/data/catalog.py"]["sha256"]
+    assert hashlib.sha256(source.read_bytes()).hexdigest() == manifest["source_files"]["basinflow/data/events.py"]["sha256"]
     assert manifest["environment"]["python_executable"] == sys.executable
     assert "torch" in manifest["environment"]["packages"]
     assert len(manifest["git"]["diff_head_sha256"]) == 64

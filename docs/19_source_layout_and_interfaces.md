@@ -183,7 +183,7 @@ filters = self.reference_filter(torch.cat([reference_radial, bond_change_onehot]
 `bond_change_onehot` 形状 `[E, 3]`，与 `edge_index` 对齐。这是**边条件**，不进入
 坐标通道，等变性不受影响（one-hot 是标量不变量）。
 
-**决策 4：泄漏审计。** 必须沿用 `active_prior` / `target_active_mask` 的既有分离模式：
+**决策 4：泄漏审计。** 必须沿用 `active_prior`（输入条件）/ 监督目标 的既有分离模式：
 
 - 训练/诊断数据集从**目标**计算标签 → 写入种子；
 - `BasinDataset`（无目标推理路径）**只读种子**，绝不读目标；
@@ -235,3 +235,7 @@ filters = self.reference_filter(torch.cat([reference_radial, bond_change_onehot]
 0.7 Å 量级，原因见 `docs/22` §二（条件只覆盖 32% 的原子，且 `(R, 拓扑)` 一对多）。
 c 项（离路径增广/加噪，对应 MolGEN 的 `x0std = 1.0`）与 d 项（角度基）本轮状态：
 c 已开跑（`transition1x_bond_change_x0std1`），d 仍按计划不做。
+
+> **2026-09-15 更新（`docs/27`）**：数据层重写后监督侧不再是 `target_active_mask`——
+> active/direction 标签已按“派生量不随源一起存”的判据删除，监督只剩 velocity/endpoint 目标；
+> 本文其余部分是对当时代码的审计记录，未回改。

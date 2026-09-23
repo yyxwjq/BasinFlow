@@ -43,7 +43,7 @@ alternative authority.  For now the filename convention is sufficient.
 **Status**: available but unused.  **Affects**: `raw_events.py`.
 
 The CSV columns `global_event` and `local_event` are informational.
-They could be injected into `EventRecord.metadata` so that downstream
+They could be injected into `Event.metadata` so that downstream
 code can query integer event ordinals without parsing filenames.
 
 Low priority — no current use case.
@@ -96,7 +96,7 @@ basin-level sampling.
 Current behavior:
 
 - `active_prior` is the model input condition from the seed.
-- `target_active_mask` is the supervised label used only by losses.
+- The velocity/endpoint target is the only supervised label; `active_prior` is an input condition.
 - `CandidateSampler` builds inference batches with `active_prior` and no
   target active labels.
 

@@ -17,18 +17,18 @@ EVENT_RE = re.compile(r"(reactant|product|saddle)_(\d+)\.con")
 
 
 def process_basin(
-    basin_id: int,
-    event_counter: int,
+    state_id: int,
+    event_id: int,
     events_output_dir: Path,
     output_format: str = "traj",
 ) -> tuple[list[dict[str, Any]], int]:
-    """Process events under a single basin (``<basin_id>/procdata``)."""
-    if output_format not in {"extxyz", "traj"}:
-        raise ValueError("output_format must be 'extxyz' or 'traj'")
-    procdata = Path(str(basin_id)) / "procdata"
+    """Process one EON state's events (``<state_id>/procdata``)."""
+    if output_format != "traj":
+        raise ValueError("only 'traj' output is supported: extxyz does not carry ASE constraints")
+    procdata = Path(str(state_id)) / "procdata"
     if not procdata.is_dir():
-        print(f"Skipping basin {basin_id}: missing procdata")
-        return [], event_counter
+        print(f"Skipping state {state_id}: missing procdata")
+        return [], event_id
 
     # Group .con files by event number: {num: {role: path}}
     by_event: dict[int, dict[str, Path]] = {}
@@ -38,43 +38,62 @@ def process_basin(
             by_event.setdefault(int(m.group(2)), {})[m.group(1)] = f
 
     if not by_event:
-        print(f"Basin {basin_id}: no matching events")
-        return [], event_counter
+        print(f"State {state_id}: no matching events")
+        return [], event_id
 
-    basin_events: list[dict[str, Any]] = []
+    records: list[dict[str, Any]] = []
     for local_num in sorted(by_event):
         files = by_event[local_num]
         missing = [r for r in REQUIRED_ROLES if r not in files]
         if missing:
-            print(f"Basin {basin_id}, Event {local_num}: missing {missing}")
+            print(f"State {state_id}, process {local_num}: missing {missing}")
             continue
         try:
             roles = [*REQUIRED_ROLES, *[r for r in OPTIONAL_ROLES if r in files]]
             frames = [read(files[r]) for r in roles]
-            out_name = f"event_{event_counter}.{output_format}"
+            # Provenance travels with the frames, so no side table is needed.
+            for frame, role in zip(frames, roles):
+                frame.info.update(
+                    {
+                        "dataset_kind": "eon_akmc_event",
+                        "source_state": int(state_id),
+                        "source_process": int(local_num),
+                        "source_file": str(files[role]),
+                        "role": frame.info.get("role", role) if role == "reactant" else role,
+                    }
+                )
+            out_name = f"event_{event_id}.{output_format}"
             write(events_output_dir / out_name, frames)
-            basin_events.append(
-                {"global_event": event_counter, "local_event": local_num,
-                 "basin": basin_id, "file": out_name}
+            records.append(
+                {"event_id": event_id, "state": state_id, "process": local_num, "file": out_name}
             )
-            print(f"√ Basin {basin_id}, Event {local_num} → Global {event_counter}")
-            event_counter += 1
+            print(f"√ state {state_id}, process {local_num} → event {event_id}")
+            event_id += 1
         except KeyboardInterrupt:
             raise
         except Exception as e:
-            print(f"× Basin {basin_id}, Event {local_num}: {e}")
+            print(f"× state {state_id}, process {local_num}: {e}")
 
-    return basin_events, event_counter
+    return records, event_id
 
 
-def save_basin_table(all_events: list[dict[str, Any]], output_dir: Path) -> None:
-    """Write basin mapping CSV."""
-    path = output_dir / "basin_table.csv"
-    with path.open("w", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=["global_event", "local_event", "basin", "file"])
-        w.writeheader()
-        w.writerows(all_events)
-    print(f"\n📋 Basin table saved: {path}")
+def write_group_table(all_events: list[dict[str, Any]], output_dir: Path) -> Path:
+    """Write ``basin_table.csv`` mapping each event to its source state.
+
+    The table is an evaluation side file: it says which recorded steps belong to
+    the same EON state, so a candidate can be scored against all known products of
+    that state. Training never reads it.
+    """
+    path = Path(output_dir) / "basin_table.csv"
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite existing group table: {path}")
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["event_id", "basin"])
+        for record in all_events:
+            writer.writerow([record["event_id"], record["state"]])
+    print(f"\n🗂  Group table saved: {path}")
+    return path
 
 
 def generate_summary(all_events: list[dict[str, Any]]) -> None:
@@ -82,10 +101,10 @@ def generate_summary(all_events: list[dict[str, Any]]) -> None:
     if not all_events:
         print("\n No events processed")
         return
-    counts = Counter(e["basin"] for e in all_events)
-    print(f"\n{SEP}\n Summary — {len(all_events)} events, {len(counts)} basins\n{'-' * 30}")
-    for basin in sorted(counts):
-        print(f"Basin {basin}: {counts[basin]} events")
+    counts = Counter(e["state"] for e in all_events)
+    print(f"\n{SEP}\n Summary — {len(all_events)} events, {len(counts)} states\n{'-' * 30}")
+    for state in sorted(counts):
+        print(f"State {state}: {counts[state]} events")
     print(SEP)
 
 
@@ -96,10 +115,12 @@ def main() -> None:
         help="root directory containing integer-named basin folders",
     )
     parser.add_argument(
-        "--format",
-        choices=["traj", "extxyz"],
-        default="traj",
-        help="output event format; traj preserves ASE FixAtoms constraints",
+        "--basin-table",
+        action="store_true",
+        help=(
+            "also write basin_table.csv (event_id,basin), mapping every event to its "
+            "source EON state; used by evaluation to score against a whole basin"
+        ),
     )
     args = parser.parse_args()
 
@@ -123,12 +144,13 @@ def main() -> None:
             bid,
             counter,
             out_dir,
-            output_format=args.format,
+            output_format="traj",
         )
         all_events.extend(records)
 
     if all_events:
-        save_basin_table(all_events, out_dir)
+        if args.basin_table:
+            write_group_table(all_events, out_dir)
         generate_summary(all_events)
     else:
         print("\n No events processed")

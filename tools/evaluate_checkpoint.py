@@ -20,8 +20,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.partitions import load_data_partitions
+from basinflow.data import event_target, select_events
+from basinflow.sampling.ode import DEFAULT_ATOL, DEFAULT_RTOL, DEFAULT_METHOD
+from basinflow.workflows.dataset import load_configured_dataset
 from basinflow.evaluation.single_event_molecule import run_single_event_molecule_trials
 from basinflow.models.factory import (
     build_model,
@@ -37,23 +38,22 @@ def single_event_catalog(catalog: EventCatalog) -> EventCatalog:
     """Keep only events whose product keeps the reactant's fragment structure.
 
     This is a scope decision about which benchmark is being reported, not a
-    per-sample oracle: the filter reads the reference event once per basin and
-    the same ids are removed for every arm being compared.  See
-    ``docs/22`` section 八 for why the dissociation records are excluded.
+    per-sample oracle: the filter reads each reference event once and the same ids
+    are removed for every arm being compared.  See ``docs/22`` section 八 for why
+    the dissociation records are excluded.
     """
     from basinflow.geometry.bonds import bond_adjacency, preserves_fragments
 
     keep = []
-    for basin_id in catalog.basin_ids:
-        basin = catalog.basins[basin_id]
-        reactant = catalog.structures[basin.reactant_structure_id]
-        target = catalog.event_target(basin.known_event_ids[0])
+    for event_id, event in catalog.events.items():
+        reactant = event.reactant
+        target = event_target(event)
         if preserves_fragments(
             bond_adjacency(reactant.positions, reactant.atomic_numbers, reactant.cell, reactant.pbc),
             bond_adjacency(target.target_positions, reactant.atomic_numbers, reactant.cell, reactant.pbc),
         ):
-            keep.append(basin_id)
-    return catalog.subset(keep)
+            keep.append(event_id)
+    return select_events(catalog, keep)
 
 
 def latest_epoch_checkpoint(run_dir: Path) -> Path:
@@ -74,10 +74,10 @@ def main() -> None:
     parser.add_argument("--split", default=None, help="overrides [evaluation] split")
     parser.add_argument("--steps", type=int, default=None,
                         help="overrides [evaluation] eval_num_steps")
-    parser.add_argument("--max-basins", type=int, default=None,
-                        help="score only the first N basins (smoke checks)")
-    parser.add_argument("--trials-per-basin", type=int, default=None,
-                        help="overrides [evaluation] trials_per_basin")
+    parser.add_argument("--max-events", type=int, default=None,
+                        help="score only the first N events (smoke checks)")
+    parser.add_argument("--trials-per-event", type=int, default=None,
+                        help="overrides [evaluation] trials_per_event")
     parser.add_argument("--bond-change-source", default=None, choices=("seed", "oracle"),
                         help="condition arm; defaults to [evaluation] bond_change_source")
     parser.add_argument("--single-event-only", action="store_true",
@@ -101,25 +101,27 @@ def main() -> None:
         model.eval()
 
     split_config = config["split"] if config.has_section("split") else {}
-    catalog, split, _ = load_data_partitions(config["data"], split_config)
+    catalog, split, _ = load_configured_dataset(config, seed=int(config['training'].get('seed', 42)))
     evaluation_split = (args.split or config["evaluation"].get("split", "test")).strip().lower()
     evaluation_catalog = split.select(catalog, evaluation_split)
-    if not evaluation_catalog.basin_ids:
+    if not evaluation_catalog.event_ids:
         raise ValueError(f"evaluation partition {evaluation_split} is empty")
     if args.single_event_only:
-        before = len(evaluation_catalog.basin_ids)
+        before = len(evaluation_catalog)
         evaluation_catalog = single_event_catalog(evaluation_catalog)
-        if not evaluation_catalog.basin_ids:
-            raise ValueError("single-event scope removed every basin")
-        print(f"single-event scope: {before} -> {len(evaluation_catalog.basin_ids)} basins")
-    if args.max_basins is not None:
-        evaluation_catalog = evaluation_catalog.subset(evaluation_catalog.basin_ids[:args.max_basins])
+        if not evaluation_catalog.event_ids:
+            raise ValueError("single-event scope removed every event")
+        print(f"single-event scope: {before} -> {len(evaluation_catalog.event_ids)} events")
+    if args.max_events is not None:
+        evaluation_catalog = select_events(
+            evaluation_catalog, evaluation_catalog.event_ids[: args.max_events]
+        )
 
     bond_change_source = (
         args.bond_change_source
         or config["evaluation"].get("bond_change_source", "seed").strip().lower()
     )
-    trials_per_basin = args.trials_per_basin or config["evaluation"].getint("trials_per_basin")
+    trials_per_event = args.trials_per_event or config["evaluation"].getint("trials_per_event")
     num_steps = args.steps or config["evaluation"].getint("eval_num_steps")
 
     args.output.mkdir(parents=True, exist_ok=True)
@@ -129,15 +131,16 @@ def main() -> None:
         output_dir=args.output,
         cutoff=model_cutoff(model),
         num_steps=num_steps,
-        graph_update_interval=config["evaluation"].getint("eval_graph_update_interval"),
+        integrator=config["evaluation"].get("integrator", DEFAULT_METHOD).strip().lower(),
+        solver_atol=config["evaluation"].getfloat("solver_atol", fallback=DEFAULT_ATOL),
+        solver_rtol=config["evaluation"].getfloat("solver_rtol", fallback=DEFAULT_RTOL),
         gaussian_scale=config["init"].getfloat("gaussian_scale"),
-        num_test_basins=config["evaluation"].getint("num_test_basins", fallback=None),
+        num_test_events=config["evaluation"].getint("num_test_events", fallback=None),
         sampling_seed=config["evaluation"].getint("sampling_seed"),
         selection_seed=config["evaluation"].getint("selection_seed"),
-        active_threshold=config["data"].getfloat("active_threshold"),
         device=torch.device("cpu"),
         bond_change_source=bond_change_source,
-        trials_per_basin=trials_per_basin,
+        trials_per_event=trials_per_event,
     )
     record = {
         "run_dir": str(args.run_dir.resolve()),
@@ -150,9 +153,9 @@ def main() -> None:
         "clipped_raw_rmsd_angstrom": summary["clipped_raw_rmsd_angstrom"],
         "best_of_trials": summary["best_of_trials"],
         "num_trials": summary["num_trials"],
-        "num_test_basins": summary["num_test_basins"],
+        "num_test_events": summary["num_test_events"],
         "bond_change_source": bond_change_source,
-        "trials_per_basin": summary["trials_per_test_basin"],
+        "trials_per_event": summary["trials_per_test_event"],
         "steps": num_steps,
         "single_event_only": bool(args.single_event_only),
     }

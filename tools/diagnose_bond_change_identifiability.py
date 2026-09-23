@@ -32,7 +32,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data.catalog import EventCatalog
+from basinflow.data import load_events, event_target
 from basinflow.geometry.bonds import BROKEN, FORMED, bond_adjacency, bond_change_labels
 from basinflow.geometry.mic import minimum_image_displacement
 
@@ -93,10 +93,10 @@ def _composition(species) -> str:
 
 
 def _load(events_dir: str, max_atoms: int) -> tuple[list[dict], int]:
-    catalog = EventCatalog.from_eon_directory(events_dir)
+    catalog = load_events(events_dir)
     records = []
     for event_id in catalog.event_ids:
-        target = catalog.event_target(event_id)
+        target = event_target(catalog.events[event_id])
         reactant = target.reactant
         if reactant.n_atoms > max_atoms:
             continue

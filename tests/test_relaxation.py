@@ -5,7 +5,7 @@ import types
 
 import numpy as np
 
-from basinflow.data import StructureRecord
+from basinflow.data import Structure
 
 
 def _fake_optimize(monkeypatch, calls):
@@ -36,8 +36,7 @@ class _ZeroCalculator:
 
 
 def _two_atom_structure():
-    return StructureRecord(
-        "input",
+    return Structure(
         ["Au", "Au"],
         [[0.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
         cell=np.eye(3) * 8.0,
@@ -78,11 +77,11 @@ def test_relax_drives_any_ase_calculator_and_keeps_fixed_atoms(monkeypatch):
 
     assert calls["fmax"] == 0.05
     assert calls["steps"] == 200
-    # FixAtoms comes from StructureRecord.to_ase, not from this module
+    # FixAtoms comes from Structure.to_ase, not from this module
     assert calls["atoms"].constraints[0].get_indices().tolist() == [0]
     assert np.array_equal(relaxed.movable_mask, structure.movable_mask)
-    assert relaxed.metadata["relax_calculator"] == "_ZeroCalculator"
-    assert relaxed.metadata["relax_converged"] is True
+    # The outcome is reported through the return values, not smuggled into the
+    # structure: a Structure carries geometry and its constraint only.
     assert converged is True
     assert steps == 7
 

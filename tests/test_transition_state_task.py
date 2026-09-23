@@ -2,14 +2,13 @@
 import numpy as np
 import pytest
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.data import Event, EventCatalog, Structure
 
 torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 from torch_geometric.loader import DataLoader
 
-from basinflow.data.pyg import TransitionStateDataset
+from basinflow.data import TransitionStateDataset
 from basinflow.models import FlowLossWeights, flow_loss
 from basinflow.models.factory import build_model, model_spec
 
@@ -20,13 +19,15 @@ STATE = [[0.0, 0.0, 0.0], [2.2, 0.0, 0.0], [0.0, 0.7, 0.0]]
 
 def _catalog(*, with_state: bool = True):
     structures = {
-        "r": StructureRecord("r", ["H", "H", "H"], REACTANT, cell=np.eye(3) * 15.0, pbc=False),
-        "p": StructureRecord("p", ["H", "H", "H"], PRODUCT, cell=np.eye(3) * 15.0, pbc=False),
+        "r": Structure(["H", "H", "H"], REACTANT, cell=np.eye(3) * 15.0, pbc=False),
+        "p": Structure(["H", "H", "H"], PRODUCT, cell=np.eye(3) * 15.0, pbc=False),
     }
     if with_state:
-        structures["ts"] = StructureRecord("ts", ["H", "H", "H"], STATE, cell=np.eye(3) * 15.0, pbc=False)
-    events = {"e": EventRecord("e", "r", "p", "b", "ts" if with_state else None)}
-    return EventCatalog(structures, events, {"b": BasinRecord("b", "r", ["e"])})
+        structures["ts"] = Structure(["H", "H", "H"], STATE, cell=np.eye(3) * 15.0, pbc=False)
+    event = Event("e", structures["r"], structures["p"],
+        structures["ts"] if with_state else None,
+    )
+    return EventCatalog(events={"e": event})
 
 
 def test_transition_state_dataset_conditions_on_both_endpoints():
@@ -82,7 +83,7 @@ def test_endpoint_channel_is_opt_in_and_ablates_cleanly():
     assert invariant.backbone.messages[0].endpoint_vector_filter is None
     assert equivariant.backbone.messages[0].endpoint_vector_filter is not None
 
-    weights = FlowLossWeights(velocity=1.0, active=0.0, direction=0.0, active_pos_weight=1.0, norm="l1")
+    weights = FlowLossWeights(velocity=1.0, norm="l1")
     outputs = {}
     for name, model in (("plain", plain), ("invariant", invariant), ("equivariant", equivariant)):
         out = model(batch)
@@ -109,7 +110,7 @@ def test_missing_endpoint_tensor_is_reported():
 
 
 def test_molgen_style_time_sampling_is_available_and_reproducible():
-    from basinflow.data.pyg import TransitionStateDataset
+    from basinflow.data import TransitionStateDataset
 
     fixed = TransitionStateDataset(_catalog(), flow_time=0.25)
     assert fixed[0].flow_time.tolist() == [0.25]
@@ -136,7 +137,7 @@ def test_molgen_style_time_sampling_is_available_and_reproducible():
 # whole model. These tests pin the two properties that make the TS task a flow.
 
 def test_pinned_time_cannot_be_combined_with_a_sampled_distribution():
-    from basinflow.data.pyg import TransitionStateDataset
+    from basinflow.data import TransitionStateDataset
 
     with pytest.raises(ValueError, match="cannot be combined"):
         TransitionStateDataset(_catalog(), flow_time=0.0, time_distribution="beta")
@@ -147,7 +148,7 @@ def test_pinned_time_cannot_be_combined_with_a_sampled_distribution():
 
 
 def test_sampled_source_and_time_make_the_supervision_a_field():
-    from basinflow.data.pyg import TransitionStateDataset
+    from basinflow.data import TransitionStateDataset
 
     dataset = TransitionStateDataset(_catalog(), flow_time=None, source_scale=1.0,
                                      time_distribution="beta", seed=3)
@@ -187,9 +188,51 @@ def test_sampled_source_and_time_make_the_supervision_a_field():
     assert float(dataset[0].flow_time) == float(first.flow_time)
 
 
+def test_decaying_path_is_self_limiting_and_exact():
+    """A linear path has a t-independent tangent; the decaying one does not.
+
+    This is the property that makes the field integrable: at ``t = 1`` the target
+    velocity must vanish so the target is a fixed point of the ODE, and the
+    target must vary with ``t`` so the network has to model time.
+    """
+    from basinflow.data import TransitionStateDataset
+
+    source = np.asarray(0.5 * (np.array(REACTANT) + np.array(PRODUCT)))
+    target = np.asarray(STATE)
+    linear = TransitionStateDataset(_catalog(), flow_time=None, source_scale=0.0,
+                                    time_distribution="beta", path="linear")
+    decaying = TransitionStateDataset(_catalog(), flow_time=None, source_scale=0.0,
+                                      time_distribution="beta", path="decaying")
+
+    # Linear: the same tangent at every t, so nothing forces a time dependence.
+    tangents = set()
+    for epoch in range(40):
+        linear.set_epoch(epoch)
+        tangents.add(tuple(np.round(linear[0].target_velocity.numpy().reshape(-1), 6)))
+    assert len(tangents) == 1
+
+    def state_and_speed(time: float) -> tuple[np.ndarray, float]:
+        pos, velocity = decaying._interpolate(source, target, time)
+        return pos, float(np.linalg.norm(velocity))
+
+    # The tangent is 2(1 - t)(x1 - x0): maximum at t = 0, exactly zero at t = 1.
+    assert state_and_speed(0.0)[1] > state_and_speed(0.5)[1] > state_and_speed(0.9)[1]
+    assert state_and_speed(1.0)[1] == pytest.approx(0.0, abs=1e-12)
+    # The path still ends exactly at the target.
+    assert np.allclose(state_and_speed(1.0)[0], target)
+    assert np.allclose(state_and_speed(0.0)[0], source)
+    # And the integral of the field over [0, 1] is exactly the displacement.
+    grid = np.linspace(0.0, 1.0, 20001)
+    total = sum(decaying._interpolate(source, target, float(t))[1] for t in grid) / (len(grid) - 1)
+    assert np.allclose(total, target - source, atol=1e-3)
+
+    with pytest.raises(ValueError, match="path"):
+        TransitionStateDataset(_catalog(), flow_time=None, time_distribution="beta", path="cosine")
+
+
 def test_field_is_non_trivial_across_the_path():
     """The trained quantity must vary with t, or one step is the whole model."""
-    from basinflow.data.pyg import TransitionStateDataset
+    from basinflow.data import TransitionStateDataset
 
     dataset = TransitionStateDataset(_catalog(), flow_time=None, source_scale=0.0,
                                      time_distribution="uniform", seed=11)
@@ -213,11 +256,13 @@ class _TimeRecordingModel:
 
     The field varies per atom: a spatially constant one would integrate to a
     pure translation, which any Kabsch-aligned metric correctly reports as zero
-    motion.
+    motion. With ``target="endpoint"`` the head predicts ``x1`` instead, so the
+    sampler has to recover ``v = (x1_hat - x_t)/(1 - t)``.
     """
 
-    def __init__(self, scale: float = 1.0):
+    def __init__(self, scale: float = 1.0, target: str = "velocity"):
         self.scale = scale
+        self.target = target
         self.times: list[float] = []
 
     def eval(self):
@@ -230,11 +275,16 @@ class _TimeRecordingModel:
         velocity = batch.pos.new_zeros(batch.pos.shape)
         # Atom i moves (i + 1) * scale along x: a shear, not a translation.
         velocity[:, 0] = self.scale * (torch.arange(batch.pos.shape[0]) + 1).to(batch.pos.dtype)
+        if self.target == "endpoint":
+            # Emit the x1 that corresponds to that velocity so the recovered
+            # field is identical whichever parameterisation is used.
+            time = torch.as_tensor(float(np.asarray(t).reshape(-1)[0]), dtype=batch.pos.dtype)
+            return {"velocity": (1.0 - time) * velocity}
         return {"velocity": velocity}
 
 
-def test_sampler_integrates_the_field_over_a_time_grid(tmp_path):
-    """Sampling must be an ODE: N steps of dt, queried at t = 0, dt, 2dt..."""
+def test_sampler_integrates_the_field_with_molgen_solver(tmp_path):
+    """Sampling must solve the ODE, not take one fixed-size Euler jump."""
     import csv
 
     from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd
@@ -246,37 +296,43 @@ def test_sampler_integrates_the_field_over_a_time_grid(tmp_path):
         catalog=_catalog(),
         output_dir=tmp_path,
         cutoff=5.0,
-        num_steps=4,
+        num_steps=64,
         source_scale=0.0,
-        trials_per_basin=1,
+        trials_per_event=1,
         sampling_seed=5,
     )
 
-    assert summary["num_steps"] == 4
     assert summary["evaluation_protocol"] == "transition_state_flow_ode"
-    # Four distinct query times, not one repeated t = 0.
-    assert model.times == [0.0, 0.25, 0.5, 0.75]
+    assert summary["integrator"] == "dopri5"
+    # The field is queried at several *different* times across [0, 1]; a single
+    # query at t = 0 would be the direct-regression regime this replaced.
+    assert len(model.times) >= 6
+    assert min(model.times) < 0.2
+    assert max(model.times) > 0.5
+    # The saved-point grid is the requested output grid, not a step count.
+    assert summary["saved_points"]["count"] == 1
+    assert summary["saved_points"]["mean"] == 64
 
-    # Integrating the shear over [0, 1] in four steps displaces atom i by
-    # (i + 1) A; a single query at t = 0 would displace it by a quarter of that.
+    # The shear displaces atom i by (i + 1) A over the full interval; one query
+    # at t = 0 would displace it by only a fraction of that.
     source = np.asarray(0.5 * (np.array(REACTANT) + np.array(PRODUCT)))
     n_atoms = len(source)
     displacement = np.zeros((n_atoms, 3))
     displacement[:, 0] = np.arange(1, n_atoms + 1)
-    reference = StructureRecord("r", ["H"] * n_atoms, source, cell=np.eye(3) * 15.0, pbc=False)
+    reference = Structure(["H"] * n_atoms, source, cell=np.eye(3) * 15.0, pbc=False)
 
-    def moves(scale: float) -> StructureRecord:
-        return StructureRecord("m", ["H"] * n_atoms, source + scale * displacement,
+    def moves(scale: float) -> Structure:
+        return Structure(["H"] * n_atoms, source + scale * displacement,
                                cell=np.eye(3) * 15.0, pbc=False)
 
     expected = kabsch_aligned_rmsd(moves(1.0), reference, reference)
-    one_step = kabsch_aligned_rmsd(moves(0.25), reference, reference)
+    partial = kabsch_aligned_rmsd(moves(0.25), reference, reference)
 
     rows = list(csv.DictReader((tmp_path / "sampling" / "trial_metrics.csv").open()))
     assert len(rows) == 1
-    assert float(rows[0]["total_motion_angstrom"]) == pytest.approx(expected, rel=1e-4)
+    assert float(rows[0]["total_motion_angstrom"]) == pytest.approx(expected, rel=1e-3)
     # The two regimes are far apart, so this test cannot pass by accident.
-    assert one_step < 0.4 * expected
+    assert partial < 0.5 * expected
 
 
 def test_sampler_rejects_an_unknown_time_law(tmp_path):
@@ -295,7 +351,7 @@ def test_sampler_rejects_an_unknown_time_law(tmp_path):
 
 
 def test_sampler_writes_every_trial_integration_path(tmp_path):
-    """``write_trajectories`` must store x0 ... x_num_steps with the right species."""
+    """``write_trajectories`` must store the source plus every accepted step."""
     import csv
 
     from ase.io import read
@@ -308,9 +364,9 @@ def test_sampler_writes_every_trial_integration_path(tmp_path):
         catalog=_catalog(),
         output_dir=tmp_path,
         cutoff=5.0,
-        num_steps=3,
+        num_steps=64,
         source_scale=0.0,
-        trials_per_basin=2,
+        trials_per_event=2,
         sampling_seed=11,
         time_distribution="beta",
         write_trajectories=True,
@@ -319,7 +375,10 @@ def test_sampler_writes_every_trial_integration_path(tmp_path):
     written = summary["trajectories"]
     assert written["written"] is True
     assert written["format"] == "extxyz"
-    assert written["frames_per_trial"] == 4
+    # The written path is the solver's saved grid: ``num_steps`` frames from
+    # t = 0 to t = 1, whatever internal steps the adaptive solver took.
+    assert written["frames_per_trial"] == "num_steps (saved grid)"
+    expected_frames = int(summary["num_steps"])
 
     rows = list(csv.DictReader((tmp_path / "sampling" / "trial_metrics.csv").open()))
     assert len(rows) == 2
@@ -327,16 +386,14 @@ def test_sampler_writes_every_trial_integration_path(tmp_path):
 
     for row in rows:
         atoms = read(tmp_path / "sampling" / row["trajectory"], index=":")
-        assert len(atoms) == 4
+        assert len(atoms) == expected_frames
         assert all(frame.get_chemical_symbols() == ["H", "H", "H"] for frame in atoms)
-        # Frame 0 is the drawn source; the field is a shear, so integrating in
-        # equal steps moves atom i by (i + 1) * k / num_steps cumulatively.
-        k = 1.0 / 3.0
-        for step, frame in enumerate(atoms):
-            np.testing.assert_allclose(frame.positions[1][0] - atoms[0].positions[1][0],
-                                       2.0 * k * step, atol=1e-4)
-            np.testing.assert_allclose(frame.positions[2][0] - atoms[0].positions[2][0],
-                                       3.0 * k * step, atol=1e-4)
+        # Frame 0 is the drawn source; the field is a shear, so atom i advances
+        # monotonically by (i + 1) A over the whole interval.
+        last = atoms[-1].positions - atoms[0].positions
+        np.testing.assert_allclose(last[0][0], 1.0, atol=1e-3)
+        np.testing.assert_allclose(last[1][0], 2.0, atol=1e-3)
+        np.testing.assert_allclose(last[2][0], 3.0, atol=1e-3)
 
 
 def test_trajectories_are_off_by_default_and_do_not_write_files(tmp_path):
@@ -347,9 +404,9 @@ def test_trajectories_are_off_by_default_and_do_not_write_files(tmp_path):
         catalog=_catalog(),
         output_dir=tmp_path,
         cutoff=5.0,
-        num_steps=2,
+        num_steps=64,
         source_scale=0.0,
-        trials_per_basin=2,
+        trials_per_event=2,
         sampling_seed=3,
     )
 

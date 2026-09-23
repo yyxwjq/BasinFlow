@@ -3,7 +3,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from basinflow.geometry.radius_graph import dual_radius_graph
+from basinflow.geometry.graph import torch_neighbor_graph_from_batch
 from .painn import DualPaiNN
 
 
@@ -26,9 +26,13 @@ def prepare_flow_input(data, cutoff, time=None):
         graph_ids = torch.zeros(len(current), dtype=torch.long, device=current.device)
     cells = _field(data, "cell").reshape(-1, 3, 3).to(current)
     periodic = _field(data, "pbc").reshape(-1, 3).bool()
-    graph = dual_radius_graph(reference, current, graph_ids, cells, periodic, cutoff)
-    receiver = graph["edge_index"][0]
-    shifts = torch.einsum("ei,eij->ej", graph["cell_offsets"].to(current), cells[graph_ids[receiver]])
+    # One call builds the union graph topology plus both states' edge vectors, so
+    # the backbone receives edge geometry instead of reconstructing it.
+    graph = torch_neighbor_graph_from_batch(
+        {"pos": current, "batch": graph_ids, "cell": cells, "pbc": periodic},
+        cutoff=cutoff,
+        reference_positions=reference,
+    )
     if time is None:
         time = _field(data, "flow_time", 0.0)
     time = torch.as_tensor(time, dtype=current.dtype, device=current.device).reshape(-1)
@@ -47,7 +51,13 @@ def prepare_flow_input(data, cutoff, time=None):
         "positions_2": current,
         "elements": _field(data, "z"),
         "edge_index": graph["edge_index"],
-        "shifts": shifts,
+        "shifts": torch.einsum(
+            "ei,eij->ej",
+            graph["cell_offsets"].to(current),
+            cells[graph_ids[graph["edge_index"][0]]],
+        ),
+        "edge_vectors": graph["edge_vectors"],
+        "edge_vectors_2": graph["edge_vectors_2"],
         "time": time,
         "node_conditions": torch.stack([movable.to(current), active_prior.to(current)], dim=-1),
         "batch": graph_ids,
@@ -70,7 +80,7 @@ class PaiNN(nn.Module):
 
     builds_own_graph = True
 
-    def __init__(self, num_features=128, num_radial_basis=32, num_layers=4, num_elements=119, r_max=5.0, time_dim=32, radial_basis="bessel", envelope="polynomial", stability_mode="scaled", bond_change_condition=False, bond_change_direction=False, endpoint_condition=False, endpoint_equivariant=False):
+    def __init__(self, num_features=128, num_radial_basis=32, num_layers=4, num_elements=119, r_max=5.0, time_dim=32, radial_basis="bessel", envelope="polynomial", stability_mode="scaled", bond_change_condition=False, bond_change_direction=False, endpoint_condition=False, endpoint_equivariant=False, time_scale=1.0, time_per_layer=False):
         super().__init__()
         self.r_max = float(r_max)
         self.cutoff = self.r_max
@@ -81,7 +91,8 @@ class PaiNN(nn.Module):
         self.endpoint_condition = bool(endpoint_condition)
         self.endpoint_equivariant = bool(endpoint_equivariant)
         self.backbone = DualPaiNN(num_features, num_radial_basis, num_layers, num_elements, r_max, time_dim, radial_basis, envelope, stability_mode, bond_change_condition, bond_change_direction,
-            endpoint_condition, endpoint_equivariant)
+            endpoint_condition, endpoint_equivariant, time_scale,
+            time_per_layer)
 
     def forward(self, batch, t=None):
         output = self.backbone(prepare_flow_input(batch, self.r_max, t))

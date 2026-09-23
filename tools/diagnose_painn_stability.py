@@ -13,11 +13,12 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data import BasinSplit, EventCatalog, EventFlowDataset
+from basinflow.data import EventFlowDataset, load_events, resolve_split
 from basinflow.seeds import GaussianInit
 from basinflow.models import flow_loss
 from basinflow.models.factory import build_model, model_spec
 from basinflow.models.painn.modules import prepare_flow_input
+from basinflow.workflows.config import parse_pbc_override
 
 
 def tensor_stats(value):
@@ -96,15 +97,16 @@ def main():
         return
     training_seed = config["split"].getint("seed")
     torch.manual_seed(training_seed)
-    pbc = [value.strip().lower() == "true" for value in config["data"]["pbc_override"].split(",")]
-    catalog = EventCatalog.from_eon_directory(config["data"]["events_dir"], pbc_override=pbc)
-    split = BasinSplit.load(config["split"]["manifest"])
+    pbc = parse_pbc_override(config["data"].get("pbc_override"))
+    events_dir = config["data"]["events_dir"]
+    catalog = load_events(events_dir, pbc_override=pbc)
+    split, _ = resolve_split(events_dir, catalog, auto=False)
     train_catalog = split.select(catalog, "train")
     backend, model_config = model_spec(config["model"])
     model_config["stability_mode"] = args.stability_mode
     model = build_model(backend, model_config)
     initializers = [GaussianInit(scale=config["init"].getfloat("gaussian_scale"), random_seed=training_seed)]
-    dataset = EventFlowDataset(train_catalog, initializers, seed=args.dataset_seed, active_threshold=config["data"].getfloat("active_threshold"))
+    dataset = EventFlowDataset(train_catalog, initializers, seed=args.dataset_seed)
     optimizer = torch.optim.Adam(model.parameters(), lr=config["training"].getfloat("lr"))
     active_batch = None
     stage_stats = {}

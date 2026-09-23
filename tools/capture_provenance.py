@@ -132,7 +132,10 @@ def capture_provenance(run_dirs: list[str | Path], output_dir: str | Path) -> di
                 for path in sorted(directory.rglob("*"))
                 if path.is_file() and not path.is_symlink() and path.suffix in ARTIFACT_SUFFIXES
             }
-            required = ("config.resolved.ini", "split_manifest.json", "checkpoint.pt", "training.log")
+            # A run no longer writes a split manifest: the split lives in the
+            # events directory as split.csv, and data_sources.json records which
+            # file it came from.
+            required = ("config.resolved.ini", "data_sources.json", "checkpoint.pt", "training.log")
             manifest["runs"].append({
                 "path": str(directory),
                 "artifacts": artifacts,

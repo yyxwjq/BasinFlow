@@ -1,6 +1,6 @@
 """Separate on-path velocity fit from off-path rollout drift for a trained flow.
 
-Diagnostic only. Nothing here produces basin-level proposals or reads a target
+Diagnostic only. Nothing here produces event-level proposals or reads a target
 during normal inference; every target-dependent number is labelled as such.
 
 Three questions are answered for one saved checkpoint:
@@ -30,8 +30,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data.partitions import load_data_partitions
-from basinflow.data.pyg import EventFlowDataset
+from basinflow.data import EventFlowDataset, load_events, resolve_split, select_events
+from basinflow.sampling.ode import sample_ode
+from basinflow.workflows.config import parse_pbc_override
 from basinflow.seeds import GaussianInit, ProductInit
 from basinflow.models.factory import load_model_checkpoint, model_cutoff
 
@@ -40,11 +41,11 @@ def _catalog_and_split(run_dir):
     config = configparser.ConfigParser()
     if not config.read(run_dir / "config.resolved.ini"):
         raise FileNotFoundError(f"no resolved configuration in {run_dir}")
-    split_config = dict(config["split"]) if config.has_section("split") else {}
-    pbc_text = config["data"].get("pbc_override", "auto").lower()
-    pbc = None if pbc_text in {"auto", "none", ""} else [
-        value.strip() == "true" for value in pbc_text.split(",")]
-    catalog, split, _ = load_data_partitions(config["data"], split_config, pbc_override=pbc)
+    events_dir = config["data"]["events_dir"]
+    catalog = load_events(
+        events_dir, pbc_override=parse_pbc_override(config["data"].get("pbc_override"))
+    )
+    split, _ = resolve_split(events_dir, catalog, auto=False)
     return config, catalog, split
 
 
@@ -53,7 +54,7 @@ def _mse(prediction, target, movable):
     return float((residual ** 2).sum() / max(int(movable.sum()) * 3, 1))
 
 
-def on_path_fit(model, catalog, times, *, gaussian_scale, active_threshold, seed, batch_size,
+def on_path_fit(model, catalog, times, *, gaussian_scale, seed, batch_size,
                 bond_change_condition=False):
     """Velocity fit on the exact training line, against the zero-velocity baseline.
 
@@ -67,7 +68,7 @@ def on_path_fit(model, catalog, times, *, gaussian_scale, active_threshold, seed
         dataset = EventFlowDataset(
             catalog,
             [GaussianInit(scale=gaussian_scale, random_seed=seed + index)],
-            active_threshold=active_threshold, flow_time=float(time), seed=seed,
+            flow_time=float(time), seed=seed,
             bond_change_condition=bond_change_condition)
         loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
         model_error = 0.0
@@ -109,11 +110,15 @@ def on_path_fit(model, catalog, times, *, gaussian_scale, active_threshold, seed
     return rows
 
 
-def rollout(model, catalog, initializer, *, num_steps, active_threshold, seed,
+def rollout(model, catalog, initializer, *, num_steps, seed,
             batch_size, oracle, bond_change_condition=False):
-    """Euler rollout of the learned field from the seed's own starting geometry."""
+    """Rollout of the learned field from the seed's own starting geometry.
+
+    Integrated with the same ``torchdiffeq`` solver the sampler uses (and MolGEN
+    uses), so this diagnostic measures the field and not an Euler discretisation.
+    """
     dataset = EventFlowDataset(
-        catalog, [initializer], active_threshold=active_threshold, flow_time=0.0,
+        catalog, [initializer], flow_time=0.0,
         seed=seed, diagnostic_oracle=oracle, bond_change_condition=bond_change_condition)
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False)
     model.eval()
@@ -121,12 +126,15 @@ def rollout(model, catalog, initializer, *, num_steps, active_threshold, seed,
     with torch.no_grad():
         for batch in loader:
             start = batch.pos.clone()
-            positions = batch.pos.clone()
-            for step in range(num_steps):
-                batch.pos = positions
-                output = model(batch, t=step / num_steps)
-                positions = positions + output["velocity"] / float(num_steps)
-                positions[~batch.movable_mask] = batch.reactant_pos[~batch.movable_mask]
+            frozen = ~batch.movable_mask
+
+            def field(state, time):
+                batch.pos = state
+                batch.flow_time = time.reshape(1, 1).expand(batch.num_graphs, 1)
+                velocity = model(batch, t=batch.flow_time.squeeze(-1))["velocity"]
+                return torch.where(frozen[:, None], torch.zeros_like(velocity), velocity)
+
+            positions, _ = sample_ode(field, batch.pos.clone(), num_steps=num_steps)
             movable = batch.movable_mask
             count = max(int(movable.sum()), 1)
             rmsd = lambda a, b: float(np.sqrt(
@@ -179,25 +187,24 @@ def main():
                 "test": split.test_ids}[args.split])
     chosen = sorted(np.random.default_rng(args.seed).choice(
         ids, size=min(args.num_events, len(ids)), replace=False).tolist())
-    subset_catalog = catalog.subset(chosen)
+    subset_catalog = select_events(catalog, chosen)
 
     gaussian_scale = config["init"].getfloat("gaussian_scale")
-    active_threshold = config["data"].getfloat("active_threshold")
     training_seed = int(config["training"].getint("seed", 42))
 
     fit = on_path_fit(model, subset_catalog, args.times, gaussian_scale=gaussian_scale,
-                      active_threshold=active_threshold, seed=training_seed,
+                      seed=training_seed,
                       batch_size=args.batch_size,
                       bond_change_condition=bond_change_condition)
     seed_rollout = rollout(
         model, subset_catalog,
         GaussianInit(scale=gaussian_scale, random_seed=args.seed),
-        num_steps=args.rollout_steps, active_threshold=active_threshold,
+        num_steps=args.rollout_steps,
         seed=training_seed, batch_size=args.batch_size, oracle=False,
         bond_change_condition=bond_change_condition)
     oracle_rollout = rollout(
         model, subset_catalog, ProductInit(), num_steps=args.rollout_steps,
-        active_threshold=active_threshold, seed=training_seed,
+        seed=training_seed,
         batch_size=args.batch_size, oracle=True,
         bond_change_condition=bond_change_condition)
 
@@ -213,10 +220,9 @@ def main():
         "num_events": len(chosen),
         "cutoff": cutoff,
         "gaussian_scale": gaussian_scale,
-        "active_threshold": active_threshold,
         "oracle_inputs": True,
         "warning": "the oracle rollout conditions on the true product and is a diagnostic, "
-                   "never a basin-level proposal capability",
+                   "never an event-level proposal capability",
         "on_path_velocity_fit": fit,
         "rollout_from_seed": {
             "start_rmsd_vs_target": summarize(seed_rollout, "start_rmsd_vs_target"),

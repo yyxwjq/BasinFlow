@@ -2,13 +2,12 @@
 
 The condition is the discrete part of a reaction.  These tests pin the two
 properties that make it admissible: it never carries a product coordinate, and
-the basin-level view can only obtain it from the seed.
+the proposal view can only obtain it from the seed.
 """
 import numpy as np
 import pytest
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.data import EventProposalDataset, Event, EventCatalog, EventFlowDataset, Structure
 from basinflow.geometry.bonds import (
     BOND_CHANGE_CLASSES,
     BROKEN,
@@ -23,7 +22,6 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 from torch_geometric.loader import DataLoader
 
-from basinflow.data.pyg import BasinDataset, EventFlowDataset
 from basinflow.models.factory import model_spec
 from basinflow.seeds import GaussianInit
 
@@ -35,13 +33,10 @@ _PRODUCT = [[0.0, 0.0, 0.0], [3.0, 0.0, 0.0], [0.0, 0.74, 0.0]]
 
 
 def _catalog():
-    structures = {
-        "r": StructureRecord("r", ["H", "H", "H"], _REACTANT, cell=np.eye(3) * 12.0, pbc=False),
-        "p": StructureRecord("p", ["H", "H", "H"], _PRODUCT, cell=np.eye(3) * 12.0, pbc=False),
-    }
-    events = {"e": EventRecord("e", "r", "p", "b")}
-    basins = {"b": BasinRecord("b", "r", ["e"])}
-    return EventCatalog(structures, events, basins)
+    reactant = Structure(["H", "H", "H"], _REACTANT, cell=np.eye(3) * 12.0, pbc=False)
+    product = Structure(["H", "H", "H"], _PRODUCT, cell=np.eye(3) * 12.0, pbc=False)
+    return EventCatalog(
+        events={"e": Event("e", reactant, product)})
 
 
 def test_bond_change_labels_mark_the_swapped_partner():
@@ -82,7 +77,7 @@ def test_event_seed_validates_a_proposed_topology_change():
 
 def test_seed_factory_carries_the_proposed_change():
     catalog = _catalog()
-    context = SeedContext("e", "b", catalog.structures["r"])
+    context = SeedContext("e", catalog.events["e"].reactant)
     labels = np.zeros((3, 3), dtype=np.int8)
     labels[0, 2] = labels[2, 0] = FORMED
 
@@ -119,20 +114,22 @@ def test_supervised_view_can_refuse_the_oracle_labels():
                          bond_change_condition=True, bond_change_source="product")
 
 
-def test_basin_view_needs_the_seed_and_defaults_to_no_change():
-    plain = BasinDataset(_catalog(), [GaussianInit(scale=0.05, random_seed=1)],
+def test_proposal_view_needs_the_seed_and_defaults_to_no_change():
+    plain = EventProposalDataset(_catalog(), [GaussianInit(scale=0.05, random_seed=1)],
                          bond_change_condition=True)
     assert not plain[0].bond_change.any()
     assert plain[0].bond_change.shape == (1, 3, 3)
 
-    disabled = BasinDataset(_catalog(), [GaussianInit(scale=0.05, random_seed=1)])
+    disabled = EventProposalDataset(_catalog(), [GaussianInit(scale=0.05, random_seed=1)])
     assert not hasattr(disabled[0], "bond_change")
 
 
 class _ProposalInit:
     """Minimal initializer that proposes a topology change and no geometry."""
 
-    seed_type = "stub"
+    # A registered seed type: an unknown one is an error by design, and this test
+    # is about forwarding the proposal, not about the type vocabulary.
+    seed_type = "gaussian_movable"
     requires_target = False
 
     def __init__(self, labels):
@@ -141,17 +138,17 @@ class _ProposalInit:
     def generate(self, context, seed_id=None):
         return event_seed_from_context(
             context,
-            seed_id or "stub",
+            seed_id or "proposal",
             self.seed_type,
             np.zeros((context.reactant.n_atoms, 3)),
             bond_change=self.labels,
         )
 
 
-def test_basin_view_forwards_a_seed_proposal():
+def test_proposal_view_forwards_a_seed_proposal():
     labels = np.zeros((3, 3), dtype=np.int8)
     labels[0, 1] = labels[1, 0] = BROKEN
-    dataset = BasinDataset(_catalog(), [_ProposalInit(labels)], bond_change_condition=True)
+    dataset = EventProposalDataset(_catalog(), [_ProposalInit(labels)], bond_change_condition=True)
 
     assert dataset[0].bond_change[0, 0, 1].item() == BROKEN
 
@@ -210,12 +207,12 @@ def test_oracle_sampler_arm_reads_the_recorded_topology():
 
     def sampler(source):
         return CandidateSampler(model=model, init_generators=[GaussianInit(scale=0.0, random_seed=1)],
-                                num_steps=1, bond_change_source=source)
+                                num_steps=2, bond_change_source=source)
 
-    oracle = sampler("oracle")._oracle_bond_change(catalog, catalog.basins["b"])
+    oracle = sampler("oracle")._oracle_bond_change(catalog, "e")
     assert oracle[0, 0, 1].item() == BROKEN
     assert oracle[0, 0, 2].item() == FORMED
-    assert sampler("seed")._oracle_bond_change(catalog, catalog.basins["b"]) is None
+    assert sampler("seed")._oracle_bond_change(catalog, "e") is None
 
 
 def test_sampler_rejects_an_unknown_condition_source():
@@ -223,17 +220,16 @@ def test_sampler_rejects_an_unknown_condition_source():
 
     with pytest.raises(ValueError, match="bond_change_source"):
         CandidateSampler(model=None, init_generators=[GaussianInit(scale=0.0, random_seed=1)],
-                         num_steps=1, bond_change_source="product")
+                         num_steps=2, bond_change_source="product")
 
 
 def test_kabsch_aligned_rmsd_removes_a_rigid_motion_that_raw_rmsd_keeps():
-    from basinflow.data.records import StructureRecord
     from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd, movable_mic_rmsd
 
     positions = np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
     rotated = positions @ np.array([[0.0, -1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]]).T + 4.0
-    reference = StructureRecord("r", ["H"] * 3, positions, cell=np.eye(3) * 20.0, pbc=False)
-    moved = StructureRecord("m", ["H"] * 3, rotated, cell=np.eye(3) * 20.0, pbc=False)
+    reference = Structure(["H"] * 3, positions, cell=np.eye(3) * 20.0, pbc=False)
+    moved = Structure(["H"] * 3, rotated, cell=np.eye(3) * 20.0, pbc=False)
 
     assert movable_mic_rmsd(moved, reference, reference) > 3.0
     assert kabsch_aligned_rmsd(moved, reference, reference) == pytest.approx(0.0, abs=1e-9)
@@ -315,25 +311,34 @@ def test_bond_change_direction_points_towards_a_forming_bond():
     assert torch.allclose(direction.sum(0), torch.zeros(3), atol=1e-6)  # no net translation
 
 
-def test_single_event_subset_drops_a_dissociating_product():
-    from basinflow.data.catalog import EventCatalog
-    from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+def test_unknown_seed_type_is_an_error_rather_than_a_shared_embedding_row():
+    from basinflow.seeds import seed_type_id
+
+    with pytest.raises(ValueError, match="unknown seed type"):
+        seed_type_id("stub")
+    assert seed_type_id("zero") != seed_type_id("gaussian_movable")
+
+
+def test_single_event_scope_drops_a_dissociating_product():
+    from basinflow.data import single_event_scope
 
     # A connected triangle is one fragment; splitting atom 1 off makes two.
     connected = [[0.0, 0.0, 0.0], [0.74, 0.0, 0.0], [0.0, 0.74, 0.0]]
     rearranged = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.74], [0.0, 0.74, 0.0]]
     dissociated = [[0.0, 0.0, 0.0], [12.0, 0.0, 0.0], [0.0, 0.74, 0.0]]
-    structures = {
-        "r": StructureRecord("r", ["H", "H", "H"], connected, cell=np.eye(3) * 20.0, pbc=False),
-        "p": StructureRecord("p", ["H", "H", "H"], rearranged, cell=np.eye(3) * 20.0, pbc=False),
-        "pd": StructureRecord("pd", ["H", "H", "H"], dissociated, cell=np.eye(3) * 20.0, pbc=False),
-    }
-    events = {"keep": EventRecord("keep", "r", "p", "b"), "drop": EventRecord("drop", "r", "pd", "bd")}
-    basins = {"b": BasinRecord("b", "r", ["keep"]), "bd": BasinRecord("bd", "r", ["drop"])}
-    catalog = EventCatalog(structures, events, basins)
+    reactant = Structure(["H", "H", "H"], connected, cell=np.eye(3) * 20.0, pbc=False)
+    catalog = EventCatalog(
+        events={
+            "keep": Event("keep", reactant,
+                Structure(["H", "H", "H"], rearranged, cell=np.eye(3) * 20.0, pbc=False),
+            ),
+            "drop": Event("drop", reactant,
+                Structure(["H", "H", "H"], dissociated, cell=np.eye(3) * 20.0, pbc=False),
+            ),
+        },
+    )
 
-    kept = catalog.single_event_subset()
+    kept = single_event_scope(catalog)
 
-    assert kept.basin_ids == ["b"]
+    assert kept.event_ids == ["keep"]
     assert set(kept.events) == {"keep"}
-

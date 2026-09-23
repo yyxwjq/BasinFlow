@@ -11,10 +11,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 from ase import Atoms
+from ase.constraints import FixAtoms
 from ase.io import read, write
 
 from basinflow.evaluation.semantic_flow import _write_representatives
-from basinflow.data.records import StructureRecord
+from basinflow.data import Structure
 
 
 def _write_events(events_dir):
@@ -27,20 +28,15 @@ def _write_events(events_dir):
         )
         product = reactant.copy()
         product.positions[1, 0] += shift
-        reactant.arrays["move_mask"] = np.array([False, True, False])
-        product.arrays["move_mask"] = np.array([False, True, False])
-        write(events_dir / f"event_{index}.extxyz", [reactant, product])
+        for role, frame in zip(("reactant", "product"), (reactant, product)):
+            frame.info["role"] = role
+            # .traj carries the constraint; an extxyz frame would lose it.
+            frame.set_constraint(FixAtoms(mask=[True, False, True]))
+        write(events_dir / f"event_{index}.traj", [reactant, product])
 
-    with (events_dir / "basin_table.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=["global_event", "local_event", "basin", "file"])
-        writer.writeheader()
-        for index in range(2):
-            writer.writerow({
-                "global_event": index,
-                "local_event": 0,
-                "basin": f"basin-{index}",
-                "file": f"event_{index}.extxyz",
-            })
+    from basinflow.data import EventSplit, save_split
+
+    save_split(EventSplit(("0",), (), ("1",)), events_dir / "split.csv")
 
 
 def test_semantic_benchmark_continues_after_eam_failure_and_writes_artifacts(tmp_path):
@@ -56,8 +52,7 @@ def test_semantic_benchmark_continues_after_eam_failure_and_writes_artifacts(tmp
                 "[data]",
                 f"events_dir = {events_dir}",
                 "pbc_override = auto",
-                "active_source = displacement",
-                "active_threshold = 0.1",
+                "auto_split = false",
                 "",
                 "[output]",
                 f"output_dir = {output_dir}",
@@ -85,9 +80,7 @@ def test_semantic_benchmark_continues_after_eam_failure_and_writes_artifacts(tmp
                 "",
                 "[loss]",
                 "velocity_weight = 1.0",
-                "active_weight = 0.1",
-                "direction_weight = 0.1",
-                "active_pos_weight = auto",
+                "norm = l1",
                 "",
                 "[runtime]",
                 "device = cpu",
@@ -97,8 +90,7 @@ def test_semantic_benchmark_continues_after_eam_failure_and_writes_artifacts(tmp
                 "",
                 "[evaluation]",
                 "eval_num_steps = 2",
-                "eval_graph_update_interval = 1",
-                "trials_per_test_basin = 2",
+                "trials_per_test_event = 2",
                 "sampling_seed = 11",
                 "",
                 "[relaxation]",
@@ -129,11 +121,11 @@ def test_semantic_benchmark_continues_after_eam_failure_and_writes_artifacts(tmp
     assert (output_dir / "sampling" / "summary.json").is_file()
     assert (output_dir / "loss_by_epoch.csv").is_file()
     assert (output_dir / "loss_curves.png").is_file()
-    assert (output_dir / "sampling" / "plots" / "basin-0_rmsd_100_trials.png").is_file()
-    assert (output_dir / "sampling" / "plots" / "rmsd_by_basin.png").is_file()
+    assert (output_dir / "sampling" / "plots" / "1_rmsd_100_trials.png").is_file()
+    assert (output_dir / "sampling" / "plots" / "rmsd_by_event.png").is_file()
     assert (output_dir / "sampling" / "plots" / "eam_rmsd_before_after.png").is_file()
     representative_frames = read(
-        output_dir / "sampling" / "representatives" / "basin-0.traj",
+        output_dir / "sampling" / "representatives" / "1.traj",
         ":",
     )
     assert representative_frames
@@ -141,13 +133,12 @@ def test_semantic_benchmark_continues_after_eam_failure_and_writes_artifacts(tmp
 
     resolved = configparser.ConfigParser()
     resolved.read(output_dir / "config.resolved.ini")
-    assert resolved["evaluation"]["trials_per_test_basin"] == "2"
+    assert resolved["evaluation"]["trials_per_test_event"] == "2"
 
 
 def test_representatives_write_event_mapping_manifest(tmp_path):
-    def structure(structure_id, x):
-        return StructureRecord(
-            structure_id=structure_id,
+    def structure(x):
+        return Structure(
             species=["Au"],
             positions=[[x, 0.0, 0.0]],
             cell=np.eye(3) * 10.0,
@@ -155,8 +146,8 @@ def test_representatives_write_event_mapping_manifest(tmp_path):
         )
 
     products = {
-        "event_a": structure("product_a", 0.0),
-        "event_b": structure("product_b", 0.2),
+        "event_a": structure(0.0),
+        "event_b": structure(0.2),
     }
     records = defaultdict(list)
     for trial_index, raw_x, raw_event, relaxed_x, relaxed_event in [
@@ -176,8 +167,8 @@ def test_representatives_write_event_mapping_manifest(tmp_path):
             "product": products[relaxed_event],
             "rmsd_angstrom": relaxed_x,
         }
-        raw = structure(f"raw_{trial_index}", raw_x)
-        relaxed = structure(f"relaxed_{trial_index}", relaxed_x)
+        raw = structure(raw_x)
+        relaxed = structure(relaxed_x)
         records["basin-x"].append(
             {
                 "row": {
@@ -209,8 +200,9 @@ def test_representatives_write_event_mapping_manifest(tmp_path):
     output_dir = tmp_path / "representatives"
     _write_representatives(records, output_dir)
 
+    assert (output_dir / "basin-x.traj").is_file()
     manifest = json.loads((output_dir / "basin-x.json").read_text(encoding="utf-8"))
-    assert manifest["basin_id"] == "basin-x"
+    assert manifest["event_id"] == "basin-x"
     assert [item["rank"] for item in manifest["representatives"]] == [
         "best",
         "median",

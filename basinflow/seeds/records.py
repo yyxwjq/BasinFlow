@@ -6,7 +6,34 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 if TYPE_CHECKING:
-    from basinflow.data.records import StructureRecord
+    from basinflow.data.structures import Structure
+
+
+# The single source of seed-type ids. ``EGNNFlow.seed_type_embedding`` indexes
+# this, so a type that is not listed here would silently share an embedding row
+# with whichever type happened to land on the same fallback id -- which is why an
+# unknown type raises instead. ``midpoint_bridge`` is the R+P -> TS source: there
+# is no seed object for it, but it is a distinct input mode and has to be
+# distinguishable from an R -> P sample with a zero seed.
+SEED_TYPE_IDS = {
+    "zero": 0,
+    "gaussian_movable": 1,
+    "directional": 2,
+    "product_displacement": 3,
+    "midpoint_bridge": 4,
+}
+
+
+def seed_type_id(seed_type: str) -> int:
+    """Integer id of ``seed_type``, or ``ValueError`` if it is not registered."""
+    name = str(seed_type)
+    try:
+        return SEED_TYPE_IDS[name]
+    except KeyError:
+        raise ValueError(
+            f"unknown seed type {name!r}; register it in basinflow.seeds.records.SEED_TYPE_IDS "
+            f"(known: {sorted(SEED_TYPE_IDS)})"
+        ) from None
 
 
 def _as_vector_array(name: str, value) -> np.ndarray:
@@ -99,8 +126,7 @@ class SeedContext:
     """Reactant-only information an ordinary initializer may consume."""
 
     event_id: str
-    basin_id: str
-    reactant: StructureRecord
+    reactant: Structure
 
     @property
     def movable_mask(self) -> np.ndarray:
@@ -134,7 +160,6 @@ def event_seed_from_context(
     )
     seed_metadata = dict(metadata or {})
     seed_metadata.setdefault("event_id", context.event_id)
-    seed_metadata.setdefault("basin_id", context.basin_id)
     return EventSeed(
         seed_id=seed_id,
         seed_type=seed_type,

@@ -5,22 +5,17 @@ torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 from torch_geometric.loader import DataLoader
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.pyg import BasinDataset, EventFlowDataset
-from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.data import EventProposalDataset, Event, EventCatalog, EventFlowDataset, Structure
 from basinflow.seeds import GaussianInit, ProductInit, ZeroInit
 from basinflow.sampling import CandidateSampler
 from basinflow.models import EGNNFlow, flow_loss
 
 
 def _catalog():
-    structures = {
-        "r": StructureRecord("r", ["H"], [[4.8, 0.0, 0.0]], cell=np.eye(3) * 5, pbc=True),
-        "p": StructureRecord("p", ["H"], [[0.2, 0.0, 0.0]], cell=np.eye(3) * 5, pbc=True),
-    }
-    events = {"e": EventRecord("e", "r", "p", "b")}
-    basins = {"b": BasinRecord("b", "r", ["e"])}
-    return EventCatalog(structures, events, basins)
+    reactant = Structure(["H"], [[4.8, 0.0, 0.0]], cell=np.eye(3) * 5, pbc=True)
+    product = Structure(["H"], [[0.2, 0.0, 0.0]], cell=np.eye(3) * 5, pbc=True)
+    return EventCatalog(
+        events={"e": Event("e", reactant, product)})
 
 
 def test_product_flow_dataset_emits_one_supervised_pyg_sample():
@@ -31,19 +26,23 @@ def test_product_flow_dataset_emits_one_supervised_pyg_sample():
     assert sample.pos.shape == (1, 3)
     assert torch.allclose(sample.target_pos, torch.tensor([[5.2, 0.0, 0.0]]))
     assert sample.flow_time.tolist() == [0.25]
-    assert hasattr(sample, "target_active_mask")
+    assert hasattr(sample, "target_velocity")
+    # No derived active-atom or direction label is shipped: both are functions of
+    # the displacement target, and a second copy is a second thing to keep in sync.
+    assert not hasattr(sample, "target_active_mask")
+    assert not hasattr(sample, "target_direction")
     assert not hasattr(sample, "transition_state")
 
 
-def test_basin_proposal_dataset_never_exposes_event_targets():
-    dataset = BasinDataset(_catalog(), [ZeroInit()])
+def test_event_proposal_dataset_never_exposes_event_targets():
+    dataset = EventProposalDataset(_catalog(), [ZeroInit()])
 
     sample = dataset[0]
 
-    assert sample.basin_id == "b"
+    assert sample.event_id == "e"
     assert not hasattr(sample, "target_pos")
     assert not hasattr(sample, "target_velocity")
-    assert not hasattr(sample, "target_active_mask")
+    assert not any(key.startswith("target") for key in sample.keys())
 
 
 def test_product_init_requires_explicit_oracle_diagnostic_mode():
@@ -87,10 +86,10 @@ def test_candidate_sampler_accepts_catalog_and_never_needs_event_targets():
                 "direction": torch.zeros_like(batch.pos),
             }
 
-    result = CandidateSampler(ZeroModel(), [ZeroInit()], num_steps=1).sample(_catalog(), "b")
+    result = CandidateSampler(ZeroModel(), [ZeroInit()], num_steps=2).sample(_catalog(), "e")
 
     assert len(result.candidates) == 1
-    assert result.candidates[0].sampling_config["evaluation_mode"] == "basin_level_no_oracle_no_relaxation"
+    assert result.candidates[0].sampling_config["evaluation_mode"] == "event_level_no_oracle_no_relaxation"
 
 
 def test_egnn_consumes_pyg_batch_and_rebuilds_graph_from_pos():
@@ -118,7 +117,7 @@ def test_gaussian_training_noise_is_epoch_fresh_and_reproducible(random_seed):
     assert torch.allclose(second.pos, second.source_pos + second.flow_time * second.target_velocity)
 
 
-def test_velocity_only_loss_never_reads_disabled_auxiliary_labels():
+def test_velocity_only_loss_has_no_unread_weight_fields():
     from basinflow.models import FlowLossWeights
 
     velocity = torch.tensor([[1.0, 2.0, 3.0]], requires_grad=True)
@@ -126,9 +125,9 @@ def test_velocity_only_loss_never_reads_disabled_auxiliary_labels():
     loss, parts = flow_loss({"velocity": velocity}, batch)
     loss.backward()
 
-    assert FlowLossWeights().active == 0.0
-    assert FlowLossWeights().direction == 0.0
+    # Every field of the weight set is read by flow_loss, and the loss reports
+    # exactly the term it optimises.
+    assert set(FlowLossWeights.__dataclass_fields__) == {"velocity", "norm"}
+    assert set(parts) == {"velocity_loss"}
     assert loss.item() == pytest.approx(14 / 3)
     assert torch.allclose(velocity.grad, 2 * velocity.detach() / 3)
-    assert parts["active_loss"].item() == 0
-    assert parts["direction_loss"].item() == 0

@@ -155,7 +155,7 @@ Mitigation:
 
 Mitigation:
 
-- Use a shared `StructureRecord`.
+- Use a shared `Structure`.
 - Keep PBC fields optional.
 - Test molecular and periodic examples in every core module.
 

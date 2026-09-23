@@ -1,34 +1,26 @@
 import numpy as np
 import pytest
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.pyg import EventFlowDataset
-from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.data import Event, EventCatalog, EventFlowDataset, Structure
 from basinflow.seeds import ProductInit, ZeroInit
 
 
 def _toy_dataset():
-    structures = {
-        "r": StructureRecord(
-            "r",
-            ["H", "O", "H"],
-            [[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [1.6, 0.0, 0.0]],
-            cell=np.eye(3) * 10,
-            pbc=[False, False, False],
-            constraints=[True, False, True],
-        ),
-        "p": StructureRecord(
-            "p",
-            ["H", "O", "H"],
-            [[0.0, 0.0, 0.0], [1.05, 0.0, 0.0], [1.6, 0.0, 0.0]],
-            cell=np.eye(3) * 10,
-            pbc=[False, False, False],
-        ),
-    }
+    reactant = Structure(
+        ["H", "O", "H"],
+        [[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [1.6, 0.0, 0.0]],
+        cell=np.eye(3) * 10,
+        pbc=[False, False, False],
+        movable_mask=[False, True, False],
+    )
+    product = Structure(
+        ["H", "O", "H"],
+        [[0.0, 0.0, 0.0], [1.05, 0.0, 0.0], [1.6, 0.0, 0.0]],
+        cell=np.eye(3) * 10,
+        pbc=[False, False, False],
+    )
     return EventCatalog(
-        structures=structures,
-        events={"e": EventRecord("e", "r", "p", "b")},
-        basins={"b": BasinRecord("b", "r", ["e"])},
+        events={"e": Event("e", reactant, product)},
     )
 
 
@@ -74,7 +66,7 @@ def test_resume_rejects_partial_epoch_or_changed_training_data(tmp_path):
     train_product_flow(model, _toy_dataset(), initializers, epochs=1,
                        epoch_checkpoint_dir=tmp_path / 'complete')
     changed = _toy_dataset()
-    changed.structures['p'].positions[1, 0] += .1
+    changed.events['e'].product.positions[1, 0] += .1
     with pytest.raises(ValueError, match='dataset'):
         train_product_flow(model, changed, initializers, epochs=2,
                            resume_from=tmp_path / 'complete/epoch_0001.pt')
@@ -164,13 +156,13 @@ def test_train_product_flow_writes_step_log(tmp_path):
     )
 
     lines = log_path.read_text(encoding="utf-8").strip().splitlines()
-    assert lines[0] == "epoch step total_loss velocity_loss active_loss direction_loss"
+    assert lines[0] == "epoch step total_loss velocity_loss"
     assert len(lines) == 3
     assert [(int(parts[0]), int(parts[1])) for parts in (line.split() for line in lines[1:])] == [
         (1, 1),
         (1, 2),
     ]
-    assert len(lines[1].split()) == 6
+    assert len(lines[1].split()) == 4
     assert history[0]["num_items"] == 2
 
 
@@ -193,30 +185,12 @@ def test_train_product_flow_full_batch_logs_one_step_for_all_items(tmp_path):
     )
 
     lines = log_path.read_text(encoding="utf-8").strip().splitlines()
-    assert lines[0] == "epoch step total_loss velocity_loss active_loss direction_loss"
+    assert lines[0] == "epoch step total_loss velocity_loss"
     assert len(lines) == 2
     assert [int(value) for value in lines[1].split()[:2]] == [1, 1]
     assert history[0]["num_items"] == 2
     assert history[0]["num_batches"] == 1
     assert history[0]["last_step"] == 1
-
-
-def test_active_threshold_controls_catalog_supervision_labels():
-    catalog = _toy_dataset()
-
-    assert catalog.event_target("e", active_threshold=0.3).active_mask.sum() == 0
-
-
-def test_active_pos_weight_uses_movable_train_atoms_only():
-    from basinflow.training import active_pos_weight
-
-    assert active_pos_weight(_toy_dataset(), active_threshold=0.2) == 0.0
-
-
-def test_active_pos_weight_returns_one_for_all_negative_train_labels():
-    from basinflow.training import active_pos_weight
-
-    assert active_pos_weight(_toy_dataset(), active_threshold=0.3) == 1.0
 
 
 def test_train_epoch_uses_one_optimizer_step_per_pyg_batch():
@@ -486,7 +460,7 @@ def test_training_rejects_empty_validation_before_updating_model():
 
     model = EGNNFlow(hidden_dim=8, num_layers=1)
     before = {name: value.clone() for name, value in model.state_dict().items()}
-    empty_catalog = EventCatalog(structures={}, events={}, basins={})
+    empty_catalog = EventCatalog(events={})
     with pytest.raises(ValueError, match="validation dataset"):
         train_product_flow(
             model, _toy_dataset(), [ZeroInit()],

@@ -195,25 +195,57 @@ def convert_transition1x(
     align_product_to_reactant: bool = False,
     center: bool = False,
     output_format: str = "traj",
+    partitions: dict[str, list[int]] | None = None,
+    write_groups: bool = False,
 ) -> list[dict[str, str]]:
-    """Write selected Transition1x rows as BasinFlow standard event files."""
-    if output_format not in {"traj", "extxyz"}:
-        raise ValueError("output_format must be 'traj' or 'extxyz'")
+    """Write selected Transition1x rows as BasinFlow event files.
+
+    Event files are named ``event_<n>.<ext>``, where ``n`` is the row's position
+    in the exported set: that integer is the event id the data layer reads and the
+    id a ``split.csv`` stores. No side table is written -- each frame carries its
+    metadata in ``info``, including the source index and the source ``rxn`` name.
+
+    ``partitions`` optionally maps a partition name to the source indices that
+    belong to it; those rows are written under ``<output_dir>/<partition>/`` so the
+    train/val/test assignment is expressed by the directory layout itself.
+
+    ``write_groups`` additionally writes ``basin_table.csv`` (``event_id,basin``)
+    next to the events, where ``basin`` is the source reaction name. It is an
+    evaluation side file -- a candidate can be scored against every known product
+    of the same reaction -- and training never reads it.
+    """
+    if output_format != "traj":
+        raise ValueError("only 'traj' output is supported: extxyz does not carry ASE constraints")
     source = Path(source_path)
     if not source.is_file():
         raise FileNotFoundError(f"Transition1x pickle not found: {source}")
     output = Path(output_dir)
     raw = _load_source(source)
     indices = _selected_indices(raw, selection, single_fragment_only=single_fragment_only, source_indices=source_indices)
+    if partitions is not None:
+        known = set(indices)
+        for name, members in partitions.items():
+            unknown = [index for index in members if index not in known]
+            if unknown:
+                raise ValueError(f"partition {name!r} names rows outside the selection: {unknown[:5]}")
+        assigned = [index for members in partitions.values() for index in members]
+        if len(set(assigned)) != len(assigned):
+            raise ValueError("partitions overlap: a source index appears in more than one partition")
+        indices = [index for name in ("train", "val", "test") if name in partitions
+                   for index in partitions[name]]
     # Each target frame gets its own rigid transform onto the reactant, because
     # the source frames do not share an orientation. It is well defined for
     # multi-fragment records too, so the only requirement is a nonperiodic
     # structure (checked in _align_frames_to_reactant).
     output.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, str]] = []
+    partition_of = {
+        index: name for name, members in (partitions or {}).items() for index in members
+    }
     for ordinal, source_index in enumerate(indices):
-        file_name = f"event_{source_index}.{output_format}"
-        destination = output / file_name
+        file_name = f"event_{ordinal}.{output_format}"
+        destination = output / partition_of.get(source_index, "") / file_name
+        destination.parent.mkdir(parents=True, exist_ok=True)
         if destination.exists():
             raise FileExistsError(f"refusing to overwrite existing event file: {destination}")
         metadata = _metadata(raw, source, source_index, "explicit_indices" if source_indices is not None else selection, center)
@@ -232,32 +264,36 @@ def convert_transition1x(
         write(destination, frames)
         rows.append(
             {
-                "global_event": str(ordinal),
-                "local_event": str(source_index),
-                "basin": f"transition1x:{source_index}",
+                "event_id": str(ordinal),
                 "file": file_name,
+                "partition": partition_of.get(source_index, ""),
                 "dataset_kind": "transition1x_single_event_molecule",
                 "source_index": str(source_index),
             }
         )
-    table_path = output / "basin_table.csv"
-    if table_path.exists():
-        raise FileExistsError(f"refusing to overwrite existing basin table: {table_path}")
-    with table_path.open("w", newline="", encoding="utf-8") as table_file:
-        writer = csv.DictWriter(
-            table_file,
-            fieldnames=[
-                "global_event",
-                "local_event",
-                "basin",
-                "file",
-                "dataset_kind",
-                "source_index",
-            ],
-        )
-        writer.writeheader()
-        writer.writerows(rows)
+    if write_groups:
+        _write_group_table(output, rows, raw)
     return rows
+
+
+def _write_group_table(
+    output: Path,
+    rows: list[dict[str, str]],
+    raw: dict[str, Any],
+) -> Path:
+    """Write ``basin_table.csv`` mapping each event to its source reaction."""
+    reactions = raw["reactant"].get("rxn")
+    if reactions is None:
+        raise ValueError("cannot write a group table: the source has no reactant.rxn field")
+    path = output / "basin_table.csv"
+    if path.exists():
+        raise FileExistsError(f"refusing to overwrite existing group table: {path}")
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.writer(handle)
+        writer.writerow(["event_id", "basin"])
+        for row in rows:
+            writer.writerow([row["event_id"], str(reactions[int(row["source_index"])])])
+    return path
 
 
 def main() -> None:
@@ -270,7 +306,23 @@ def main() -> None:
     parser.add_argument("--single-fragment-only", action="store_true", help="intersect selection with source single_fragment flags")
     parser.add_argument("--align-product-to-reactant", action="store_true", help="proper Kabsch alignment of single-fragment product targets to reactants")
     parser.add_argument("--center", action="store_true", help="center each frame at its centroid before writing")
-    parser.add_argument("--format", dest="output_format", choices=["traj", "extxyz"], default="traj")
+    parser.add_argument(
+        "--basin-table",
+        action="store_true",
+        help=(
+            "also write basin_table.csv (event_id,basin), mapping every exported event "
+            "to its source reaction; used by evaluation to score against a whole basin"
+        ),
+    )
+    parser.add_argument(
+        "--split-file",
+        type=Path,
+        help=(
+            "JSON object mapping train/val/test to source row indices; those rows are "
+            "written under <output_dir>/<partition>/ and the split is expressed by the "
+            "directory layout instead of a separate file"
+        ),
+    )
     args = parser.parse_args()
     source_indices = None
     if args.indices_json is not None:
@@ -278,6 +330,12 @@ def main() -> None:
             source_indices = json.load(indices_file)
         if not isinstance(source_indices, list):
             parser.error("--indices-json must contain a JSON list of integer source indices")
+    partitions = None
+    if args.split_file is not None:
+        partitions = json.loads(args.split_file.read_text(encoding="utf-8"))
+        if not isinstance(partitions, dict) or not set(partitions) <= {"train", "val", "test"}:
+            parser.error("--split-file must be a JSON object with train/val/test keys")
+        partitions = {name: [int(value) for value in members] for name, members in partitions.items()}
     rows = convert_transition1x(
         args.pickle_path,
         args.output_dir,
@@ -286,7 +344,9 @@ def main() -> None:
         single_fragment_only=args.single_fragment_only,
         align_product_to_reactant=args.align_product_to_reactant,
         center=args.center,
-        output_format=args.output_format,
+        output_format="traj",
+        partitions=partitions,
+        write_groups=args.basin_table,
     )
     print(f"Converted {len(rows)} Transition1x rows to {Path(args.output_dir).resolve()}")
 

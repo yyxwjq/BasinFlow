@@ -38,7 +38,7 @@ def test_dataset_public_names_are_canonical():
     import basinflow.data as data
 
     assert hasattr(data, "EventFlowDataset")
-    assert hasattr(data, "BasinDataset")
+    assert hasattr(data, "EventProposalDataset")
     assert hasattr(data, "EventCatalog")
     assert not hasattr(data, "EventDataset")
     assert not hasattr(data, "ProductFlowDataset")

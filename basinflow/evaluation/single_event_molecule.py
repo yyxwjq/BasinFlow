@@ -11,14 +11,15 @@ import ase.io
 import numpy as np
 
 from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd, movable_mic_rmsd
-from basinflow.data.catalog import EventCatalog
+from basinflow.data import EventCatalog, event_target
 from basinflow.seeds import GaussianInit
 from basinflow.sampling import CandidateSampler
+from basinflow.sampling.ode import DEFAULT_ATOL, DEFAULT_RTOL, DEFAULT_METHOD
 
 
 _TRIAL_COLUMNS = [
     "evaluation_protocol",
-    "pseudo_basin_id",
+    "event_id",
     "event_id",
     "source_index",
     "trial_index",
@@ -26,25 +27,7 @@ _TRIAL_COLUMNS = [
     "init_random_seed",
     "raw_rmsd_angstrom",
     "aligned_rmsd_angstrom",
-    "target_active_atoms",
-    "predicted_active_atoms",
-    "active_precision",
-    "active_recall",
-    "active_f1",
 ]
-
-
-def _active_metrics(target: np.ndarray, predicted: list[int] | None) -> dict[str, float]:
-    target_set = set(np.flatnonzero(target).tolist())
-    predicted_set = set(predicted or [])
-    true_positive = len(target_set & predicted_set)
-    precision = true_positive / len(predicted_set) if predicted_set else 0.0
-    recall = true_positive / len(target_set) if target_set else 0.0
-    return {
-        "active_precision": precision,
-        "active_recall": recall,
-        "active_f1": 2.0 * precision * recall / (precision + recall) if precision + recall else 0.0,
-    }
 
 
 # ReactOT and MolGEN both clip a proposal at 1.0 A before averaging, which is
@@ -52,12 +35,12 @@ def _active_metrics(target: np.ndarray, predicted: list[int] | None) -> dict[str
 _RMSD_CLIP = 1.0
 
 
-def _best_per_basin(rows: list[dict[str, Any]], key: str) -> list[float]:
+def _best_per_event(rows: list[dict[str, Any]], key: str) -> list[float]:
     best: dict[str, float] = {}
     for row in rows:
-        basin_id = row["pseudo_basin_id"]
+        event_id = row["event_id"]
         value = float(row[key])
-        best[basin_id] = min(best[basin_id], value) if basin_id in best else value
+        best[event_id] = min(best[event_id], value) if event_id in best else value
     return list(best.values())
 
 
@@ -87,43 +70,43 @@ def _matplotlib():
 def _write_rmsd_plots(rows: list[dict[str, Any]], plots_dir: Path) -> None:
     plots_dir.mkdir(parents=True, exist_ok=True)
     plt = _matplotlib()
-    by_basin: dict[str, list[dict[str, Any]]] = {}
+    by_event: dict[str, list[dict[str, Any]]] = {}
     for row in rows:
-        by_basin.setdefault(str(row["pseudo_basin_id"]), []).append(row)
+        by_event.setdefault(str(row["event_id"]), []).append(row)
 
-    basin_means = []
-    for basin_id, basin_rows in by_basin.items():
-        basin_rows.sort(key=lambda row: int(row["trial_index"]))
-        trials = [int(row["trial_index"]) for row in basin_rows]
-        values = [float(row["raw_rmsd_angstrom"]) for row in basin_rows]
-        basin_mean = float(np.mean(values))
-        basin_means.append((basin_id, basin_mean))
+    event_means = []
+    for event_id, event_rows in by_event.items():
+        event_rows.sort(key=lambda row: int(row["trial_index"]))
+        trials = [int(row["trial_index"]) for row in event_rows]
+        values = [float(row["raw_rmsd_angstrom"]) for row in event_rows]
+        event_mean = float(np.mean(values))
+        event_means.append((event_id, event_mean))
         figure, axes = plt.subplots(1, 2, figsize=(10, 4))
         axes[0].plot(trials, values, "o-", markersize=2, linewidth=0.8)
-        axes[0].axhline(basin_mean, color="tab:red", linestyle="--", linewidth=1, label=f"mean={basin_mean:.3f} Å")
+        axes[0].axhline(event_mean, color="tab:red", linestyle="--", linewidth=1, label=f"mean={event_mean:.3f} Å")
         axes[0].set_xlabel("Trial index")
         axes[0].set_ylabel("Raw product RMSD (Å)")
         axes[0].grid(alpha=0.25)
         axes[0].legend(fontsize=8)
         axes[1].hist(values, bins=min(25, max(5, len(values) // 4)), alpha=0.75)
-        axes[1].axvline(basin_mean, color="tab:red", linestyle="--", linewidth=1)
+        axes[1].axvline(event_mean, color="tab:red", linestyle="--", linewidth=1)
         axes[1].set_xlabel("Raw product RMSD (Å)")
         axes[1].set_ylabel("Trial count")
         axes[1].grid(alpha=0.25)
-        figure.suptitle(f"Basin {basin_id} · {len(values)} trials")
+        figure.suptitle(f"Event {event_id} · {len(values)} trials")
         figure.tight_layout()
-        figure.savefig(plots_dir / f"{basin_id}_rmsd_100_trials.png", dpi=140)
+        figure.savefig(plots_dir / f"{event_id}_rmsd_100_trials.png", dpi=140)
         plt.close(figure)
 
-    ordered = sorted(basin_means, key=lambda item: item[0])
+    ordered = sorted(event_means, key=lambda item: item[0])
     figure, axis = plt.subplots(figsize=(max(7, len(ordered) * 0.32), 4.5))
     axis.plot(np.arange(len(ordered)), [value for _, value in ordered], "o", markersize=3)
-    axis.set_xlabel("Test pseudo-basin")
+    axis.set_xlabel("Test event")
     axis.set_ylabel("Mean raw product RMSD (Å)")
-    axis.set_xticks(np.arange(len(ordered)), [basin_id for basin_id, _ in ordered], rotation=60, ha="right")
+    axis.set_xticks(np.arange(len(ordered)), [event_id for event_id, _ in ordered], rotation=60, ha="right")
     axis.grid(alpha=0.25)
     figure.tight_layout()
-    figure.savefig(plots_dir / "rmsd_by_basin.png", dpi=140)
+    figure.savefig(plots_dir / "rmsd_by_event.png", dpi=140)
     plt.close(figure)
 
     values = np.asarray([float(row["raw_rmsd_angstrom"]) for row in rows], dtype=float)
@@ -135,7 +118,7 @@ def _write_rmsd_plots(rows: list[dict[str, Any]], plots_dir: Path) -> None:
     axis.axvline(mean_value, color="tab:red", linestyle="--", linewidth=1.5, label=f"global mean={mean_value:.3f} Å")
     axis.set_xlabel("Raw product RMSD (Å)")
     axis.set_ylabel("Total trial count")
-    axis.set_title(f"All test-basin samples · below mean={below.mean():.1%}, above mean={above.mean():.1%}")
+    axis.set_title(f"All test-event samples · below mean={below.mean():.1%}, above mean={above.mean():.1%}")
     axis.legend()
     axis.grid(alpha=0.25)
     figure.tight_layout()
@@ -150,37 +133,37 @@ def run_single_event_molecule_trials(
     output_dir: str | Path,
     cutoff: float,
     num_steps: int,
-    graph_update_interval: int,
     gaussian_scale: float,
     num_trials: int | None = None,
-    trials_per_basin: int = 1,
-    num_test_basins: int | None = None,
+    trials_per_event: int = 1,
+    num_test_events: int | None = None,
     sampling_seed: int,
     selection_seed: int,
-    active_threshold: float = 0.1,
+    integrator: str = DEFAULT_METHOD,
+    solver_atol: float = DEFAULT_ATOL,
+    solver_rtol: float = DEFAULT_RTOL,
     device=None,
     bond_change_source: str = "seed",
 ) -> dict[str, Any]:
     """Run a fixed number of one-shot, no-oracle molecular product samples.
 
-    Transition1x has no multi-event basin label.  The input dataset therefore
-    uses one pseudo-basin per reaction, and this routine samples a reproducible
+    Each Transition1x reaction is one event, and this routine samples a reproducible
     subset of those reactions once each.  It deliberately does not report
     basin recall, relaxation, or saddle-validation quantities.
     """
     if not isinstance(test_catalog, EventCatalog):
         raise TypeError("test_catalog must be an EventCatalog")
-    if trials_per_basin <= 0:
-        raise ValueError("trials_per_basin must be positive")
-    available = list(test_catalog.basin_ids)
+    if trials_per_event <= 0:
+        raise ValueError("trials_per_event must be positive")
+    available = list(test_catalog.event_ids)
     if not available:
-        raise ValueError("test_catalog has no pseudo-basins to sample")
-    if num_test_basins is None:
+        raise ValueError("test_catalog has no events to sample")
+    if num_test_events is None:
         chosen_count = len(available) if num_trials is None else min(int(num_trials), len(available))
     else:
-        if num_test_basins <= 0:
-            raise ValueError("num_test_basins must be positive")
-        chosen_count = min(int(num_test_basins), len(available))
+        if num_test_events <= 0:
+            raise ValueError("num_test_events must be positive")
+        chosen_count = min(int(num_test_events), len(available))
     rng = np.random.default_rng(selection_seed)
     selected_ids = [str(item) for item in rng.choice(available, size=chosen_count, replace=False)]
 
@@ -191,47 +174,37 @@ def run_single_event_molecule_trials(
     reference_atoms = []
     rmsds: list[float] = []
     aligned_rmsds: list[float] = []
-    f1_scores: list[float] = []
-    for basin_index, basin_id in enumerate(selected_ids):
-        basin = test_catalog.basins[basin_id]
-        if len(basin.known_event_ids) != 1:
-            raise ValueError(
-                "single-event molecular diagnostics require one known event per pseudo-basin"
-            )
-        event_id = basin.known_event_ids[0]
+    for event_index, event_id in enumerate(selected_ids):
         event = test_catalog.events[event_id]
         if event.metadata.get("dataset_kind") != "transition1x_single_event_molecule":
             raise ValueError(
-                "single-event molecular diagnostics require Transition1x pseudo-basins"
+                "single-event molecular diagnostics require Transition1x event files"
             )
-        target = test_catalog.event_target(
-            event_id,
-            active_threshold=active_threshold,
-        )
+        target = event_target(event)
         product = target.product
-        for trial_index in range(int(trials_per_basin)):
-            global_trial_index = basin_index * int(trials_per_basin) + trial_index
+        for trial_index in range(int(trials_per_event)):
+            global_trial_index = event_index * int(trials_per_event) + trial_index
             init_random_seed = int(sampling_seed) + global_trial_index
             sampler = CandidateSampler(
                 model=model,
                 init_generators=[GaussianInit(scale=gaussian_scale, random_seed=init_random_seed)],
                 cutoff=float(cutoff),
                 num_steps=int(num_steps),
-                graph_update_interval=int(graph_update_interval),
+                integrator=integrator,
+                solver_atol=solver_atol,
+                solver_rtol=solver_rtol,
                 checkpoint_id=str(Path(output_dir) / "checkpoint.pt"),
                 device=device,
-                active_threshold=active_threshold,
                 bond_change_source=bond_change_source,
             )
-            result = sampler.sample(test_catalog, basin_id)
+            result = sampler.sample(test_catalog, event_id)
             candidate = result.candidates[0]
             generated = result.generated_structures[candidate.generated_structure_id]
             rmsd = movable_mic_rmsd(generated, product, target.reactant)
             aligned_rmsd = kabsch_aligned_rmsd(generated, product, target.reactant)
-            active = _active_metrics(target.active_mask, candidate.predicted_active_atoms)
             row = {
                 "evaluation_protocol": "single_event_pairwise_no_relaxation",
-                "pseudo_basin_id": basin_id,
+                "event_id": event_id,
                 "event_id": event_id,
                 "source_index": event.metadata.get("source_index"),
                 "trial_index": trial_index,
@@ -239,14 +212,10 @@ def run_single_event_molecule_trials(
                 "init_random_seed": init_random_seed,
                 "raw_rmsd_angstrom": rmsd,
                 "aligned_rmsd_angstrom": aligned_rmsd,
-                "target_active_atoms": int(np.sum(target.active_mask)),
-                "predicted_active_atoms": len(candidate.predicted_active_atoms or []),
-                **active,
             }
             rows.append(row)
             rmsds.append(rmsd)
             aligned_rmsds.append(aligned_rmsd)
-            f1_scores.append(active["active_f1"])
 
             generated_frame = generated.to_ase()
             generated_frame.info.update({"role": "generated_candidate", **row})
@@ -271,10 +240,13 @@ def run_single_event_molecule_trials(
     summary = {
         "evaluation_protocol": "single_event_pairwise_no_relaxation",
         "dataset_kind": "transition1x_single_event_molecule",
-        "available_test_pseudo_basins": len(available),
-        "selected_test_pseudo_basins": selected_ids,
-        "num_test_basins": len(selected_ids),
-        "trials_per_test_basin": int(trials_per_basin),
+        "integrator": integrator,
+        "solver": {"atol": float(solver_atol), "rtol": float(solver_rtol)},
+        "saved_points": int(num_steps),
+        "available_test_events": len(available),
+        "selected_test_events": selected_ids,
+        "num_test_events": len(selected_ids),
+        "trials_per_test_event": int(trials_per_event),
         "num_trials": len(rows),
         "sampling_seed": int(sampling_seed),
         "selection_seed": int(selection_seed),
@@ -284,11 +256,11 @@ def run_single_event_molecule_trials(
         "best_of_trials": {
             "selector": "oracle_min_rmsd",
             "notice": (
-                "Lower bound of the per-basin best-candidate arm. Selection uses the "
+                "Lower bound of the per-event best-candidate arm. Selection uses the "
                 "reference product, so it is a diagnostic ceiling and not a KMC result."
             ),
-            "raw_rmsd_angstrom": _summary(_best_per_basin(rows, "raw_rmsd_angstrom")),
-            "aligned_rmsd_angstrom": _summary(_best_per_basin(rows, "aligned_rmsd_angstrom")),
+            "raw_rmsd_angstrom": _summary(_best_per_event(rows, "raw_rmsd_angstrom")),
+            "aligned_rmsd_angstrom": _summary(_best_per_event(rows, "aligned_rmsd_angstrom")),
         },
         "raw_rmsd_mean_split": {
             "mean_angstrom": global_mean,
@@ -299,7 +271,6 @@ def run_single_event_molecule_trials(
             "above_mean_count": above_count,
             "above_mean_fraction": above_count / len(rows) if rows else None,
         },
-        "active_f1": _summary(f1_scores),
         "relaxation": "not_run",
         "saddle_validation": "not_run",
     }

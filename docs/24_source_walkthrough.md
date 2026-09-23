@@ -1,5 +1,7 @@
 # BasinFlow 源码走读清单（逐文件夹 / 逐函数）
 
+> **2026-09-15 更新（`docs/27_data_layer_rewrite_plan.md`）**：本文是当时状态的审计/报告，作为历史记录保留，未回改。其中的 `StructureRecord`/`EventRecord`/`BasinRecord`/`CandidateRecord`、`load_data_partitions`、`active_threshold`/`active_weight`/`direction_weight` 等接口已在数据层重写中删除或改名；当前契约见 `docs/03_data_schema.md` 与 `docs/21_core_api.md`。
+
 本文件是一份**可勾选的走读路线图**，不是设计文档。目标：用最短路径把 `basinflow/`
 的每个模块、每个关键函数讲到，并让每一步都可验证、可回退。
 

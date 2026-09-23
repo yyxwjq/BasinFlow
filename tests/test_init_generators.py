@@ -1,7 +1,6 @@
 import numpy as np
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.data import Event, EventCatalog, Structure, event_target
 from basinflow.seeds import (
     DirectionalInit,
     GaussianInit,
@@ -12,33 +11,28 @@ from basinflow.seeds import (
 
 
 def _seed_context():
-    structures = {
-        "r": StructureRecord(
-            "r",
-            ["Au", "Au", "Au"],
-            [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
-            cell=np.eye(3) * 10.0,
-            pbc=[False, False, False],
-            constraints=[True, False, True],
-        ),
-        "p": StructureRecord(
-            "p",
-            ["Au", "Au", "Au"],
-            [[0.0, 0.0, 0.0], [1.0, 0.4, 0.0], [2.0, 0.0, 0.0]],
-            cell=np.eye(3) * 10.0,
-            pbc=[False, False, False],
-        ),
-    }
-    events = {"e": EventRecord("e", "r", "p", "b")}
-    basins = {"b": BasinRecord("b", "r", ["e"])}
-    catalog = EventCatalog(structures, events, basins)
-    target = catalog.event_target("e")
-    return SeedContext(target.event.event_id, target.event.basin_id, target.reactant), target
+    reactant = Structure(
+        ["Au", "Au", "Au"],
+        [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [2.0, 0.0, 0.0]],
+        cell=np.eye(3) * 10.0,
+        pbc=[False, False, False],
+        movable_mask=[False, True, False],
+    )
+    product = Structure(
+        ["Au", "Au", "Au"],
+        [[0.0, 0.0, 0.0], [1.0, 0.4, 0.0], [2.0, 0.0, 0.0]],
+        cell=np.eye(3) * 10.0,
+        pbc=[False, False, False],
+    )
+    catalog = EventCatalog(
+        events={"e": Event("e", reactant, product)})
+    target = event_target(catalog.events["e"])
+    return SeedContext(target.event.event_id, target.reactant), target
 
 
 def _seed_context_with_event_id(event_id: str):
     context, target = _seed_context()
-    return SeedContext(event_id, context.basin_id, context.reactant), target
+    return SeedContext(event_id, context.reactant), target
 
 
 def test_zero_seed_generator_keeps_initial_geometry_equal_to_reactant():

@@ -1,5 +1,7 @@
 # 2026-09-10 PaiNN 工程与三数据集实验报告
 
+> **2026-09-15 更新（`docs/27_data_layer_rewrite_plan.md`）**：本文是当时状态的审计/报告，作为历史记录保留，未回改。其中的 `StructureRecord`/`EventRecord`/`BasinRecord`/`CandidateRecord`、`load_data_partitions`、`active_threshold`/`active_weight`/`direction_weight` 等接口已在数据层重写中删除或改名；当前契约见 `docs/03_data_schema.md` 与 `docs/21_core_api.md`。
+
 ## 报告状态与主要判断
 
 本报告记录 Stage 3 的**成对事件训练、反应物条件采样和未弛豫几何评价**。它不报告能垒、速率、弛豫后产物召回或鞍点验证后的 KMC 事件召回。

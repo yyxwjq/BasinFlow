@@ -11,7 +11,6 @@ from basinflow.seeds.records import EventSeed, SeedContext, event_seed_from_cont
 def _metadata(context: SeedContext, init_source: str) -> dict:
     return {
         "event_id": context.event_id,
-        "basin_id": context.basin_id,
         "init_source": init_source,
     }
 

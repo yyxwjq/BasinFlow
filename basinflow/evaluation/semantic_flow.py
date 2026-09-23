@@ -10,18 +10,22 @@ from typing import Any
 import ase.io
 import numpy as np
 
-from basinflow.evaluation.basin_recall import movable_mic_rmsd, nearest_product_match
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.records import StructureRecord
+from basinflow.evaluation.basin_recall import (
+    comparison_events,
+    movable_mic_rmsd,
+    nearest_product_match,
+)
+from basinflow.data import EventCatalog, Structure
 from basinflow.geometry.mic import pairwise_displacements
 from basinflow.seeds import GaussianInit
 from basinflow.relaxation import RelaxationConfig, relax
 from basinflow.sampling import CandidateSampler
+from basinflow.sampling.ode import DEFAULT_ATOL, DEFAULT_RTOL, DEFAULT_METHOD
 
 
 TRIAL_COLUMNS = [
     "system",
-    "basin_id",
+    "event_id",
     "trial_index",
     "candidate_id",
     "init_random_seed",
@@ -85,13 +89,12 @@ def _write_atoms(path: Path, atoms_list: list) -> None:
 
 
 def _candidate_atoms(
-    candidate: StructureRecord,
-    product: StructureRecord,
+    candidate: Structure,
+    product: Structure,
     *,
     role: str,
-    basin_id: str,
-    trial_index: int,
     event_id: str,
+    trial_index: int,
     source_file: str | None = None,
     representative_rank: str | None = None,
     row: dict[str, Any] | None = None,
@@ -107,9 +110,8 @@ def _candidate_atoms(
     atoms.set_array("mic_error", mic_error)
     atoms.info.update(_frame_info(
         role=role,
-        basin_id=basin_id,
-        trial_index=trial_index,
         event_id=event_id,
+        trial_index=trial_index,
         source_file=source_file,
         representative_rank=representative_rank,
         row=row,
@@ -119,12 +121,11 @@ def _candidate_atoms(
 
 
 def _reference_atoms(
-    product: StructureRecord,
+    product: Structure,
     *,
     role: str,
-    basin_id: str,
-    trial_index: int,
     event_id: str,
+    trial_index: int,
     source_file: str | None = None,
     representative_rank: str | None = None,
     row: dict[str, Any] | None = None,
@@ -133,9 +134,8 @@ def _reference_atoms(
     atoms.set_array("mic_error", np.zeros(product.n_atoms, dtype=float))
     atoms.info.update(_frame_info(
         role=role,
-        basin_id=basin_id,
-        trial_index=trial_index,
         event_id=event_id,
+        trial_index=trial_index,
         source_file=source_file,
         representative_rank=representative_rank,
         row=row,
@@ -147,9 +147,8 @@ def _reference_atoms(
 def _frame_info(
     *,
     role: str,
-    basin_id: str,
-    trial_index: int,
     event_id: str,
+    trial_index: int,
     source_file: str | None,
     representative_rank: str | None,
     row: dict[str, Any] | None,
@@ -158,7 +157,7 @@ def _frame_info(
     """Build ASE-serializable metadata shared by candidate and reference frames."""
     info: dict[str, Any] = {
         "role": role,
-        "basin_id": str(basin_id),
+        "event_id": str(event_id),
         "trial_index": int(trial_index),
         "nearest_event_id": str(event_id),
         "mic_error": mic_error,
@@ -202,13 +201,11 @@ def write_loss_artifacts(training_log: Path, output_dir: Path) -> None:
                 "epoch": epoch,
                 "total_loss": float(np.mean([row["total_loss"] for row in epoch_rows])),
                 "velocity_loss": float(np.mean([row["velocity_loss"] for row in epoch_rows])),
-                "active_loss": float(np.mean([row["active_loss"] for row in epoch_rows])),
-                "direction_loss": float(np.mean([row["direction_loss"] for row in epoch_rows])),
             }
         )
     csv_path = output_dir / "loss_by_epoch.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=["epoch", "total_loss", "velocity_loss", "active_loss", "direction_loss"])
+        writer = csv.DictWriter(file, fieldnames=["epoch", "total_loss", "velocity_loss"])
         writer.writeheader()
         writer.writerows(aggregate_rows)
 
@@ -217,8 +214,6 @@ def write_loss_artifacts(training_log: Path, output_dir: Path) -> None:
     for column, label in [
         ("total_loss", "total"),
         ("velocity_loss", "velocity"),
-        ("active_loss", "active"),
-        ("direction_loss", "direction"),
     ]:
         axis.plot([row["epoch"] for row in aggregate_rows], [row[column] for row in aggregate_rows], label=label)
     axis.set_xlabel("Epoch")
@@ -231,18 +226,18 @@ def write_loss_artifacts(training_log: Path, output_dir: Path) -> None:
 
 
 def write_trial_plots(rows: list[dict[str, Any]], plots_dir: Path) -> None:
-    """Write per-basin trial diagnostics and global raw/EAM comparisons."""
+    """Write per-event trial diagnostics and global raw/EAM comparisons."""
     plots_dir.mkdir(parents=True, exist_ok=True)
     plt = _matplotlib()
-    by_basin: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    by_event: dict[str, list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
-        by_basin[str(row["basin_id"])].append(row)
+        by_event[str(row["event_id"])].append(row)
 
-    for basin_id, basin_rows in by_basin.items():
-        basin_rows.sort(key=lambda row: int(row["trial_index"]))
-        trial = [int(row["trial_index"]) for row in basin_rows]
-        raw = [float(row["raw_rmsd_angstrom"]) for row in basin_rows]
-        relaxed = [_as_float(row["relaxed_rmsd_angstrom"]) for row in basin_rows]
+    for event_id, event_rows in by_event.items():
+        event_rows.sort(key=lambda row: int(row["trial_index"]))
+        trial = [int(row["trial_index"]) for row in event_rows]
+        raw = [float(row["raw_rmsd_angstrom"]) for row in event_rows]
+        relaxed = [_as_float(row["relaxed_rmsd_angstrom"]) for row in event_rows]
         figure, axes = plt.subplots(1, 2, figsize=(10, 4))
         axes[0].plot(trial, raw, "o-", label="raw", markersize=3)
         valid_trial = [value for value, rmsd in zip(trial, relaxed) if rmsd is not None]
@@ -259,30 +254,30 @@ def write_trial_plots(rows: list[dict[str, Any]], plots_dir: Path) -> None:
         axes[1].set_xlabel("Nearest-product RMSD (Å)")
         axes[1].set_ylabel("Trial count")
         axes[1].legend()
-        figure.suptitle(f"Basin {basin_id}")
+        figure.suptitle(f"Event {event_id}")
         figure.tight_layout()
-        figure.savefig(plots_dir / f"{basin_id}_rmsd_100_trials.png", dpi=160)
+        figure.savefig(plots_dir / f"{event_id}_rmsd_100_trials.png", dpi=160)
         plt.close(figure)
 
-    basin_ids = list(by_basin)
-    raw_medians = [float(np.median([float(row["raw_rmsd_angstrom"]) for row in by_basin[basin_id]])) for basin_id in basin_ids]
+    event_ids = list(by_event)
+    raw_medians = [float(np.median([float(row["raw_rmsd_angstrom"]) for row in by_event[event_id]])) for event_id in event_ids]
     relaxed_medians = []
-    for basin_id in basin_ids:
-        values = [_as_float(row["relaxed_rmsd_angstrom"]) for row in by_basin[basin_id]]
+    for event_id in event_ids:
+        values = [_as_float(row["relaxed_rmsd_angstrom"]) for row in by_event[event_id]]
         usable = [value for value in values if value is not None]
         relaxed_medians.append(float(np.median(usable)) if usable else np.nan)
-    figure, axis = plt.subplots(figsize=(max(7, len(basin_ids) * 0.32), 4.5))
-    x = np.arange(len(basin_ids))
+    figure, axis = plt.subplots(figsize=(max(7, len(event_ids) * 0.32), 4.5))
+    x = np.arange(len(event_ids))
     axis.plot(x, raw_medians, "o", label="raw median")
     if np.isfinite(relaxed_medians).any():
         axis.plot(x, relaxed_medians, "o", label="EAM-relaxed median")
-    axis.set_xticks(x, basin_ids, rotation=60, ha="right")
+    axis.set_xticks(x, event_ids, rotation=60, ha="right")
     axis.set_ylabel("Median nearest-product RMSD (Å)")
-    axis.set_xlabel("Test basin")
+    axis.set_xlabel("Test event")
     axis.legend()
     axis.grid(alpha=0.25)
     figure.tight_layout()
-    figure.savefig(plots_dir / "rmsd_by_basin.png", dpi=160)
+    figure.savefig(plots_dir / "rmsd_by_event.png", dpi=160)
     plt.close(figure)
 
     valid_rows = [row for row in rows if _as_float(row["relaxed_rmsd_angstrom"]) is not None]
@@ -315,7 +310,7 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
     import json
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    for basin_id, records in representatives.items():
+    for event_id, records in representatives.items():
         ordered = sorted(records, key=lambda record: float(record["row"]["raw_rmsd_angstrom"]))
         selected = [ordered[0], ordered[len(ordered) // 2], ordered[-1]] if ordered else []
         frames = []
@@ -329,9 +324,8 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
                 record["raw"],
                 raw_match["product"],
                 role=raw_candidate_role,
-                basin_id=basin_id,
-                trial_index=int(row["trial_index"]),
                 event_id=raw_match["event_id"],
+                trial_index=int(row["trial_index"]),
                 source_file=raw_source,
                 representative_rank=label,
                 row=row,
@@ -343,7 +337,6 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
                 frames.append(_reference_atoms(
                     raw_match["product"],
                     role="raw_reference_product",
-                    basin_id=basin_id,
                     trial_index=int(row["trial_index"]),
                     event_id=raw_match["event_id"],
                     source_file=raw_source,
@@ -354,7 +347,6 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
                     record["relaxed"],
                     relaxed_match["product"],
                     role="eam_relaxed_candidate",
-                    basin_id=basin_id,
                     trial_index=int(row["trial_index"]),
                     event_id=relaxed_match["event_id"],
                     source_file=relaxed_source,
@@ -364,7 +356,6 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
                 frames.append(_reference_atoms(
                     relaxed_match["product"],
                     role="eam_reference_product",
-                    basin_id=basin_id,
                     trial_index=int(row["trial_index"]),
                     event_id=relaxed_match["event_id"],
                     source_file=relaxed_source,
@@ -381,7 +372,6 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
                 frames.append(_reference_atoms(
                     raw_match["product"],
                     role="raw_reference_product",
-                    basin_id=basin_id,
                     trial_index=int(row["trial_index"]),
                     event_id=raw_match["event_id"],
                     source_file=raw_source,
@@ -409,7 +399,7 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
                     "frames": frame_roles,
                 }
             )
-        _write_atoms(output_dir / f"{basin_id}.traj", frames)
+        _write_atoms(output_dir / f"{event_id}.traj", frames)
         transitions: dict[str, int] = defaultdict(int)
         raw_events: dict[str, int] = defaultdict(int)
         relaxed_events: dict[str, int] = defaultdict(int)
@@ -423,14 +413,14 @@ def _write_representatives(representatives: dict[str, list[dict[str, Any]]], out
                 relaxed_events[str(relaxed_event)] += 1
                 transitions[f"{raw_event} -> {relaxed_event}"] += 1
         manifest = {
-            "basin_id": str(basin_id),
+            "event_id": str(event_id),
             "num_trials": len(records),
             "raw_nearest_event_counts": dict(raw_events),
             "relaxed_nearest_event_counts": dict(relaxed_events),
             "event_transition_counts": dict(transitions),
             "representatives": manifest_records,
         }
-        (output_dir / f"{basin_id}.json").write_text(
+        (output_dir / f"{event_id}.json").write_text(
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
             encoding="utf-8",
         )
@@ -444,29 +434,40 @@ def run_gaussian_trials(
     output_dir: Path,
     cutoff: float,
     num_steps: int,
-    graph_update_interval: int,
     gaussian_scale: float,
-    trials_per_basin: int,
+    trials_per_event: int,
     sampling_seed: int,
-    active_threshold: float = 0.1,
+    integrator: str = DEFAULT_METHOD,
+    solver_atol: float = DEFAULT_ATOL,
+    solver_rtol: float = DEFAULT_RTOL,
     device=None,
     calculator_factory=None,
     relaxation_config: RelaxationConfig | None = None,
+    groups: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Generate direct-basin Gaussian trials and optionally relax each one.
+    """Generate direct-event Gaussian trials and optionally relax each one.
 
     ``calculator_factory`` returns a fresh ASE calculator per trial; any
     calculator works (EAM via ``basinflow.relaxation.eam_calculator``, EMT, a
     DFT code, or a machine-learned potential). ``None`` disables relaxation.
+
+    ``groups`` optionally maps event id to a basin key, so each candidate is
+    scored against every known product of that basin instead of only the event
+    it was sampled for.
     """
     sampling_dir = Path(output_dir) / "sampling"
     plots_dir = sampling_dir / "plots"
     sampling_dir.mkdir(parents=True, exist_ok=True)
+    # The comparison table may cover the whole dataset; only events this run can
+    # actually score against belong in a basin comparison.
+    if groups is not None:
+        present = set(test_catalog.event_ids)
+        groups = {event_id: key for event_id, key in groups.items() if event_id in present}
     raw_atoms = []
     relaxed_atoms = []
     rows: list[dict[str, Any]] = []
     representatives: dict[str, list[dict[str, Any]]] = defaultdict(list)
-    basin_wall_times: dict[str, float] = {}
+    event_wall_times: dict[str, float] = {}
     if calculator_factory is not None and not callable(calculator_factory):
         raise TypeError("calculator_factory must be callable")
     prepared_config = None
@@ -481,28 +482,30 @@ def run_gaussian_trials(
         metrics_writer = csv.DictWriter(metrics_file, fieldnames=TRIAL_COLUMNS)
         metrics_writer.writeheader()
         metrics_file.flush()
-        for basin_id in test_catalog.basin_ids:
-            basin_started_at = time.perf_counter()
-            for trial_index in range(int(trials_per_basin)):
+        for event_id in test_catalog.event_ids:
+            event_started_at = time.perf_counter()
+            scored_against = comparison_events(test_catalog, event_id, groups)
+            for trial_index in range(int(trials_per_event)):
                 init_random_seed = int(sampling_seed) + trial_index
                 sampler = CandidateSampler(
                     model=model,
                     init_generators=[GaussianInit(scale=gaussian_scale, random_seed=init_random_seed)],
                     cutoff=float(cutoff),
                     num_steps=int(num_steps),
-                    graph_update_interval=int(graph_update_interval),
+                    integrator=integrator,
+                    solver_atol=solver_atol,
+                    solver_rtol=solver_rtol,
                     checkpoint_id=str(Path(output_dir) / "checkpoint.pt"),
                     device=device,
-                    active_threshold=active_threshold,
                 )
-                result = sampler.sample(test_catalog, basin_id)
+                result = sampler.sample(test_catalog, event_id)
                 candidate = result.candidates[0]
                 raw = result.generated_structures[candidate.generated_structure_id]
-                raw_match = nearest_product_match(raw, test_catalog, basin_id)
-                candidate_id = f"{basin_id}:trial:{trial_index}"
+                raw_match = nearest_product_match(raw, scored_against)
+                candidate_id = f"{event_id}:trial:{trial_index}"
                 row: dict[str, Any] = {
                     "system": system,
-                    "basin_id": basin_id,
+                    "event_id": event_id,
                     "trial_index": trial_index,
                     "candidate_id": candidate_id,
                     "init_random_seed": init_random_seed,
@@ -526,8 +529,7 @@ def run_gaussian_trials(
                         relaxed, converged, relax_steps = relax(raw, calculator_factory(), prepared_config)
                         relaxed_match = nearest_product_match(
                             relaxed,
-                            test_catalog,
-                            basin_id,
+                            scored_against,
                         )
                         row.update(
                             {
@@ -541,9 +543,7 @@ def run_gaussian_trials(
                                 "relaxed_rmsd_to_before_event": movable_mic_rmsd(
                                     relaxed,
                                     raw_match["product"],
-                                    test_catalog.structures[
-                                        test_catalog.basins[basin_id].reactant_structure_id
-                                    ],
+                                    test_catalog.events[event_id].reactant,
                                 ),
                                 "event_changed_after_relax": relaxed_match["event_id"] != raw_match["event_id"],
                             }
@@ -554,9 +554,8 @@ def run_gaussian_trials(
                     raw,
                     raw_match["product"],
                     role="raw_candidate",
-                    basin_id=basin_id,
-                    trial_index=trial_index,
                     event_id=raw_match["event_id"],
+                    trial_index=trial_index,
                     source_file=raw_match.get("source_file"),
                     row=row,
                 ))
@@ -565,7 +564,6 @@ def run_gaussian_trials(
                         relaxed,
                         relaxed_match["product"],
                         role="eam_relaxed_candidate",
-                        basin_id=basin_id,
                         trial_index=trial_index,
                         event_id=relaxed_match["event_id"],
                         source_file=relaxed_match.get("source_file"),
@@ -574,11 +572,11 @@ def run_gaussian_trials(
                 rows.append(row)
                 metrics_writer.writerow(row)
                 metrics_file.flush()
-                representatives[basin_id].append({"row": row, "raw": raw, "raw_match": raw_match, "relaxed": relaxed, "relaxed_match": relaxed_match})
-                progress_file.write(f"basin={basin_id} trial={trial_index} relax_status={row['relax_status']}\n")
+                representatives[event_id].append({"row": row, "raw": raw, "raw_match": raw_match, "relaxed": relaxed, "relaxed_match": relaxed_match})
+                progress_file.write(f"event={event_id} trial={trial_index} relax_status={row['relax_status']}\n")
                 progress_file.flush()
-            basin_wall_times[str(basin_id)] = time.perf_counter() - basin_started_at
-            progress_file.write(f"basin={basin_id} complete wall_time_seconds={basin_wall_times[str(basin_id)]:.3f}\n")
+            event_wall_times[str(event_id)] = time.perf_counter() - event_started_at
+            progress_file.write(f"event={event_id} complete wall_time_seconds={event_wall_times[str(event_id)]:.3f}\n")
             progress_file.flush()
     _write_atoms(sampling_dir / "generated_before_eam.traj", raw_atoms)
     _write_atoms(sampling_dir / "generated_after_eam.traj", relaxed_atoms)
@@ -601,8 +599,8 @@ def run_gaussian_trials(
             event_transition_counts[f"{before} -> {after}"] += 1
     summary = {
         "system": system,
-        "num_test_basins": len(test_catalog.basin_ids),
-        "trials_per_test_basin": int(trials_per_basin),
+        "num_test_events": len(test_catalog.event_ids),
+        "trials_per_test_event": int(trials_per_event),
         "num_trials": len(rows),
         "raw_rmsd_angstrom": _rmsd_summary(raw_values),
         "eam_relaxed_rmsd_angstrom": _rmsd_summary(relaxed_values),
@@ -614,7 +612,11 @@ def run_gaussian_trials(
         "relaxed_nearest_event_counts": dict(relaxed_event_counts),
         "event_transition_counts": dict(event_transition_counts),
         "wall_time_seconds": time.perf_counter() - started_at,
-        "per_basin_wall_time_seconds": basin_wall_times,
+        "per_event_wall_time_seconds": event_wall_times,
+        "evaluation_protocol": "event_level_gaussian_trials_no_oracle",
+        "integrator": integrator,
+        "solver": {"atol": float(solver_atol), "rtol": float(solver_rtol)},
+        "saved_points": int(num_steps),
     }
     import json
 

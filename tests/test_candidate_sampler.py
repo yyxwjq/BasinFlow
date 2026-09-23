@@ -1,41 +1,35 @@
 import numpy as np
 import pytest
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.records import BasinRecord, EventRecord, StructureRecord
+from basinflow.data import Event, EventCatalog, Structure
 from basinflow.seeds import DirectionalInit, GaussianInit, ZeroInit
 
 
 def _two_event_basin():
-    reactant = StructureRecord(
-        "r",
+    reactant = Structure(
         ["H", "O", "H"],
         [[0.0, 0.0, 0.0], [0.8, 0.0, 0.0], [1.6, 0.0, 0.0]],
         cell=np.eye(3) * 10,
         pbc=[False, False, False],
-        constraints=[True, False, True],
+        movable_mask=[False, True, False],
     )
-    p1 = StructureRecord(
-        "p1",
+    first = Structure(
         ["H", "O", "H"],
         [[0.0, 0.0, 0.0], [1.05, 0.0, 0.0], [1.6, 0.0, 0.0]],
         cell=np.eye(3) * 10,
         pbc=[False, False, False],
     )
-    p2 = StructureRecord(
-        "p2",
+    second = Structure(
         ["H", "O", "H"],
         [[0.0, 0.0, 0.0], [0.55, 0.0, 0.0], [1.6, 0.0, 0.0]],
         cell=np.eye(3) * 10,
         pbc=[False, False, False],
     )
     return EventCatalog(
-        structures={"r": reactant, "p1": p1, "p2": p2},
         events={
-            "e1": EventRecord("e1", "r", "p1", "b"),
-            "e2": EventRecord("e2", "r", "p2", "b"),
+            "e1": Event("e1", reactant, first),
+            "e2": Event("e2", reactant, second),
         },
-        basins={"b": BasinRecord("b", "r", ["e1", "e2"])},
     )
 
 
@@ -54,7 +48,7 @@ def test_candidate_sampler_generates_multiple_finite_candidates():
         num_steps=2,
     )
 
-    result = sampler.sample(catalog, "b")
+    result = sampler.sample(catalog, "e1")
 
     assert len(result.candidates) == 2
     assert len(result.generated_structures) == 2
@@ -63,7 +57,7 @@ def test_candidate_sampler_generates_multiple_finite_candidates():
         assert generated.n_atoms == 3
         assert generated.species == ["H", "O", "H"]
         assert np.isfinite(generated.positions).all()
-        assert np.array_equal(generated.pbc, catalog.structures["r"].pbc)
+        assert np.array_equal(generated.pbc, catalog.events["e1"].reactant.pbc)
 
 
 def test_candidate_sampler_rejects_nonfinite_velocity():
@@ -79,8 +73,8 @@ def test_candidate_sampler_rejects_nonfinite_velocity():
         def __call__(self, batch, t):
             return {"velocity": torch.full_like(batch.pos, float("nan"))}
 
-    with pytest.raises(FloatingPointError, match="basin b.*step 0"):
-        CandidateSampler(NonfiniteModel(), [ZeroInit()], num_steps=1).sample(_two_event_basin(), "b")
+    with pytest.raises(FloatingPointError, match="non-finite velocity"):
+        CandidateSampler(NonfiniteModel(), [ZeroInit()], num_steps=2).sample(_two_event_basin(), "e1")
 
 
 def test_candidate_sampler_preserves_original_precision_on_fixed_atoms():
@@ -97,27 +91,20 @@ def test_candidate_sampler_preserves_original_precision_on_fixed_atoms():
             return {"velocity": torch.zeros_like(batch.pos)}
 
     catalog = _two_event_basin()
-    catalog.structures["r"].positions[0] = [0.123456789, 0.987654321, 0.111111111]
-    result = CandidateSampler(ZeroModel(), [ZeroInit()], num_steps=1).sample(catalog, "b")
+    reactant = catalog.events["e1"].reactant
+    reactant.positions[0] = [0.123456789, 0.987654321, 0.111111111]
+    result = CandidateSampler(ZeroModel(), [ZeroInit()], num_steps=2).sample(catalog, "e1")
     generated = next(iter(result.generated_structures.values()))
-    fixed = ~catalog.structures["r"].movable_mask
-    np.testing.assert_array_equal(generated.positions[fixed], catalog.structures["r"].positions[fixed])
+    fixed = ~reactant.movable_mask
+    np.testing.assert_array_equal(generated.positions[fixed], reactant.positions[fixed])
 
 
-def test_candidate_sampler_honors_graph_update_interval():
+def test_egnn_graph_is_rebuilt_on_every_field_evaluation():
+    """An adaptive solver's steps are non-uniform, so the graph cannot be cached
+    on a step counter: EGNN (which does not build its own graph) must be rebuilt
+    at each field evaluation, exactly as PaiNN and MolGEN's backbone do."""
     torch = pytest.importorskip("torch")
     from basinflow.sampling import CandidateSampler
-
-    class ZeroVelocityModel:
-        def eval(self):
-            return self
-
-        def __call__(self, batch, t=0.0):
-            return {
-                "velocity": torch.zeros_like(batch["pos"]),
-                "active_logits": torch.zeros_like(batch["movable_mask"], dtype=batch["pos"].dtype),
-                "direction": torch.zeros_like(batch["pos"]),
-            }
 
     class CountingSampler(CandidateSampler):
         def __post_init__(self):
@@ -128,17 +115,19 @@ def test_candidate_sampler_honors_graph_update_interval():
             self.graph_builds += 1
             return super()._build_graph(batch)
 
-    sampler = CountingSampler(
-        ZeroVelocityModel(),
-        [ZeroInit()],
-        cutoff=2.5,
-        num_steps=5,
-        graph_update_interval=2,
-    )
+    class ZeroVelocityModel:
+        def eval(self):
+            return self
 
-    sampler.sample(_two_event_basin(), "b")
+        def __call__(self, batch, t=0.0):
+            return {"velocity": torch.zeros_like(batch.pos)}
 
-    assert sampler.graph_builds == 3
+    sampler = CountingSampler(ZeroVelocityModel(), [ZeroInit()], cutoff=2.5, num_steps=5)
+    sampler.sample(_two_event_basin(), "e1")
+
+    # dopri5 evaluates the field several times per saved interval, so a run over
+    # five saved points makes far more than five graph builds.
+    assert sampler.graph_builds > 5
 
 
 def test_candidate_sampler_uses_active_prior_without_target_active_labels():
@@ -151,25 +140,17 @@ def test_candidate_sampler_uses_active_prior_without_target_active_labels():
 
         def __call__(self, batch, t=0.0):
             assert "active_prior" in batch
-            assert "target_active_mask" not in batch
-            assert "active_mask" not in batch
-            return {
-                "velocity": torch.zeros_like(batch["pos"]),
-                "active_logits": torch.zeros_like(
-                    batch["active_prior"],
-                    dtype=batch["pos"].dtype,
-                ),
-                "direction": torch.zeros_like(batch["pos"]),
-            }
+            assert not any(key.startswith("target") for key in batch.keys())
+            return {"velocity": torch.zeros_like(batch["pos"])}
 
     sampler = CandidateSampler(
         RequiresPriorOnlyModel(),
         [ZeroInit()],
         cutoff=2.5,
-        num_steps=1,
+        num_steps=2,
     )
 
-    result = sampler.sample(_two_event_basin(), "b")
+    result = sampler.sample(_two_event_basin(), "e1")
 
     assert len(result.candidates) == 1
 
@@ -183,55 +164,30 @@ def test_candidate_sampler_records_directional_init_metadata():
             return self
 
         def __call__(self, batch, t=0.0):
-            return {
-                "velocity": torch.zeros_like(batch["pos"]),
-                "active_logits": torch.zeros_like(
-                    batch["active_prior"],
-                    dtype=batch["pos"].dtype,
-                ),
-                "direction": torch.zeros_like(batch["pos"]),
-            }
+            return {"velocity": torch.zeros_like(batch["pos"])}
 
     sampler = CandidateSampler(
         ZeroVelocityModel(),
         [DirectionalInit(direction=(1.0, 0.0, 0.0), scale=0.2, movable_rank=0)],
         cutoff=2.5,
-        num_steps=1,
+        num_steps=2,
     )
 
-    result = sampler.sample(_two_event_basin(), "b")
+    result = sampler.sample(_two_event_basin(), "e1")
     candidate = result.candidates[0]
 
-    assert candidate.metadata["seed_type"] == "directional"
-    assert candidate.metadata["seed_metadata"]["selected_atom"] == 1
-    assert candidate.metadata["seed_metadata"]["direction"] == [1.0, 0.0, 0.0]
+    assert candidate.seed_type == "directional"
+    assert candidate.seed_id == "e1:seed:0:directional"
+    assert candidate.candidate_id == "e1:candidate:0"
 
 
-def test_velocity_only_sampling_derives_mic_event_semantics():
-    torch = pytest.importorskip("torch")
-    from basinflow.sampling import CandidateSampler
+def test_sampling_queries_the_field_at_current_positions_with_consistent_edges():
+    """Every field evaluation must see edges built from the *current* positions.
 
-    class VelocityModel:
-        def eval(self):
-            return self
-
-        def __call__(self, batch, t=0.0):
-            return {"velocity": torch.tensor([[10.0, 0.0, 0.0], [9.75, 0.0, 0.0], [10.0, 0.0, 0.0]])}
-
-    catalog = _two_event_basin()
-    for structure in catalog.structures.values():
-        structure.pbc[:] = True
-    result = CandidateSampler(VelocityModel(), [ZeroInit()], num_steps=1).sample(catalog, "b")
-    candidate = result.candidates[0]
-
-    assert candidate.predicted_active_atoms == [1]
-    np.testing.assert_allclose(candidate.event_direction, [[0, 0, 0], [-1, 0, 0], [0, 0, 0]])
-    assert candidate.metadata["active_atoms_source"] == "final_mic_displacement"
-    assert candidate.metadata["event_direction_source"] == "final_mic_displacement"
-    assert candidate.sampling_config["active_threshold"] == 0.1
-
-
-def test_sampling_uses_left_endpoint_euler_and_fresh_edge_vectors():
+    The EGNN path does not carry a prebuilt graph, so the sampler rebuilds it
+    inside the field. An edge vector left over from an earlier state would make
+    the message passing read a stale geometry.
+    """
     torch = pytest.importorskip("torch")
     from basinflow.sampling import CandidateSampler
 
@@ -243,17 +199,20 @@ def test_sampling_uses_left_endpoint_euler_and_fresh_edge_vectors():
             return self
 
         def __call__(self, batch, t=0.0):
-            self.times.append(t)
+            self.times.append(float(t))
             source, target = batch.edge_index
             expected = batch.pos[target] - batch.pos[source]
             assert torch.allclose(batch.edge_vectors, expected)
             assert torch.allclose(batch.edge_lengths, torch.linalg.norm(expected, dim=1))
-            return {"velocity": torch.ones_like(batch.pos), "active_logits": torch.zeros(batch.num_nodes), "direction": torch.zeros_like(batch.pos)}
+            return {"velocity": torch.ones_like(batch.pos)}
 
     model = InspectModel()
-    CandidateSampler(model, [ZeroInit()], num_steps=3, graph_update_interval=3).sample(_two_event_basin(), "b")
+    CandidateSampler(model, [ZeroInit()], num_steps=4).sample(_two_event_basin(), "e1")
 
-    assert model.times == [0.0, 1 / 3, 2 / 3]
+    # A non-uniform set of query times spanning the interval, not an Euler grid.
+    assert len(model.times) > 4
+    assert min(model.times) >= 0.0
+    assert max(model.times) >= 0.9
 
 
 def test_sampling_records_the_actual_seed_without_regenerating():
@@ -277,13 +236,16 @@ def test_sampling_records_the_actual_seed_without_regenerating():
             return self
 
         def __call__(self, batch, t=0.0):
-            return {"velocity": torch.zeros_like(batch.pos), "active_logits": torch.zeros(batch.num_nodes), "direction": torch.zeros_like(batch.pos)}
+            return {"velocity": torch.zeros_like(batch.pos)}
 
     initializer = StatefulInit()
-    result = CandidateSampler(ZeroModel(), [initializer], num_steps=1).sample(_two_event_basin(), "b")
+    result = CandidateSampler(ZeroModel(), [initializer], num_steps=2).sample(_two_event_basin(), "e1")
 
     assert initializer.calls == 1
-    assert result.candidates[0].metadata["seed_metadata"]["generation_call"] == 1
+    # The candidate records which seed actually produced it instead of
+    # regenerating one, so the geometry and the reported provenance cannot drift.
+    assert result.candidates[0].seed_id.endswith(":seed:0:gaussian_movable")
+    assert result.candidates[0].seed_type == "gaussian_movable"
 
 
 def test_sampler_leaves_graph_construction_to_self_contained_models():
@@ -304,6 +266,6 @@ def test_sampler_leaves_graph_construction_to_self_contained_models():
         def _build_graph(self, batch):
             raise AssertionError("external graph should not be constructed")
 
-    result = NoExternalGraphSampler(OwnGraphModel(), [ZeroInit()], num_steps=2).sample(_two_event_basin(), "b")
+    result = NoExternalGraphSampler(OwnGraphModel(), [ZeroInit()], num_steps=2).sample(_two_event_basin(), "e1")
 
-    assert result.candidates[0].predicted_active_atoms == []
+    assert result.candidates[0].candidate_id == "e1:candidate:0"

@@ -1,12 +1,12 @@
 """Tensor-level radius graphs in pure PyTorch.
 
-These build graphs directly from batched tensors, with no ``StructureRecord``
-and no ASE, because the PaiNN backbone rebuilds its own graph at every
-integration step. The case-preserving reference implementation lives in
-:mod:`basinflow.geometry.graph`.
+These build graphs directly from batched tensors, with no ``Structure`` and no
+ASE, because a flow backbone rebuilds its graph at every integration step.
 
-Unlike :mod:`basinflow.geometry.graph`, this module requires torch at import
-time; it is only imported by model and sampling code.
+The single caller-facing entry point is
+:func:`basinflow.geometry.graph.torch_neighbor_graph_from_batch`, which wraps
+these primitives; this module holds the implementation and requires torch at
+import time, so it is only imported by model and sampling code.
 """
 from __future__ import annotations
 
@@ -80,11 +80,3 @@ def edge_geometry(positions, edge_index, cell_offsets, cell, batch):
     shifts = torch.einsum("ei,eij->ej", cell_offsets.to(positions), cell[batch[receiver]].to(positions))
     vectors = positions[sender] - positions[receiver] + shifts
     return vectors, torch.linalg.vector_norm(vectors, dim=-1)
-
-
-def dual_radius_graph(reference, current, batch, cell, pbc, cutoff):
-    """Union of the reference and current radius graphs, including image ids."""
-    graphs = [radius_graph(positions, batch, cell, pbc, cutoff) for positions in (reference, current)]
-    rows = torch.cat([torch.cat([graph["edge_index"].T, graph["cell_offsets"]], dim=1) for graph in graphs])
-    rows = torch.unique(rows, dim=0)
-    return {"edge_index": rows[:, :2].T.contiguous(), "cell_offsets": rows[:, 2:]}

@@ -67,10 +67,11 @@ Recommended formats:
 
 Required records:
 
-- `StructureRecord`
-- `EventRecord`
-- `BasinRecord`
-- `CandidateRecord`
+- `Structure` — geometry plus the movement constraint (`data/structures.py`)
+- `Event` — three inlined R/P/TS frames (`data/events.py`)
+- `EventCatalog.basins` — the `dict[basin_id, [event_id]]` index, not a record class
+- `sampling.Candidate` — a generated proposal; relaxation/clustering state belongs
+  to the stage that produces it, not to the data layer
 
 The source dataset should preserve basin-level grouping even if training uses pairwise samples.
 

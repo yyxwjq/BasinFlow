@@ -2,7 +2,7 @@
 Train the BasinFlow product/event flow on an events folder.
 
 Default dataset: /Users/wx/Desktop/benchmark/au/events.
-Default outputs: runs/au_product_flow/checkpoint.pt, split_manifest.json, training.log.
+Default outputs: runs/au_product_flow/checkpoint.pt, training.log.
 """
 from __future__ import annotations
 
@@ -17,9 +17,9 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data.catalog import BasinSplit, EventCatalog
-from basinflow.data.pyg import EventFlowDataset
-from basinflow.data.records import StructureRecord
+from basinflow.data import (EventFlowDataset, Structure, event_target, load_events,
+                            split_events)
+from basinflow.sampling.ode import DEFAULT_ATOL, DEFAULT_RTOL, DEFAULT_METHOD, sample_ode
 from basinflow.evaluation import movable_mic_rmsd
 from basinflow.models import FlowLossWeights
 from basinflow.models.factory import build_model, model_spec
@@ -28,7 +28,7 @@ from basinflow.seeds import (
     ProductInit,
     ZeroInit,
 )
-from basinflow.training import active_pos_weight, train_product_flow
+from basinflow.training import train_product_flow
 
 
 def _summary(values: list[float]) -> dict[str, float | int | None]:
@@ -37,7 +37,7 @@ def _summary(values: list[float]) -> dict[str, float | int | None]:
     return {"num_items": len(values), "mean_rmsd": float(sum(values) / len(values))}
 
 
-def _initialization_rmsd(catalog, generators, *, active_threshold: float) -> dict:
+def _initialization_rmsd(catalog, generators) -> dict:
     """Report diagnostic seed quality without exposing targets to normal seeds."""
     from basinflow.seeds import SeedContext
 
@@ -45,14 +45,13 @@ def _initialization_rmsd(catalog, generators, *, active_threshold: float) -> dic
     for name, initializer in generators.items():
         values = []
         for event_id in catalog.event_ids:
-            target = catalog.event_target(event_id, active_threshold=active_threshold)
-            context = SeedContext(event_id, target.event.basin_id, target.reactant)
+            target = event_target(catalog.events[event_id])
+            context = SeedContext(event_id, target.reactant)
             kwargs = {"seed_id": f"{event_id}:{name}"}
             if getattr(initializer, "requires_target", False):
                 kwargs["target_displacement"] = target.displacement
             seed = initializer.generate(context, **kwargs)
-            generated = StructureRecord(
-                f"{event_id}:{name}:initial",
+            generated = Structure(
                 list(target.reactant.species),
                 seed.initial_positions(target.reactant.positions),
                 cell=target.reactant.cell,
@@ -70,11 +69,18 @@ def _rollout_rmsd(
     generators,
     *,
     num_steps: int,
-    active_threshold: float,
     device,
     seed: int,
+    integrator: str = DEFAULT_METHOD,
+    solver_atol: float = DEFAULT_ATOL,
+    solver_rtol: float = DEFAULT_RTOL,
 ) -> dict:
-    """Pairwise no-relaxation RMSD, using labels only after rollout."""
+    """Pairwise no-relaxation RMSD, using labels only after rollout.
+
+    The rollout goes through the shared ``torchdiffeq`` solver, the same one the
+    sampler and MolGEN use.
+    """
+    import torch
     from torch_geometric.loader import DataLoader
 
     was_training = model.training
@@ -82,26 +88,23 @@ def _rollout_rmsd(
     report = {}
     try:
         for initializer in generators:
-            dataset = EventFlowDataset(
-                catalog,
-                [initializer],
-                active_threshold=active_threshold,
-                flow_time=0.0,
-                seed=seed,
-            )
+            dataset = EventFlowDataset(catalog, [initializer], flow_time=0.0, seed=seed)
             values = []
             for batch in DataLoader(dataset, batch_size=1, shuffle=False):
                 batch = batch.to(device)
-                positions = batch.pos
-                for step in range(num_steps):
-                    batch.pos = positions
-                    output = model(batch, t=(step + 0.5) / num_steps)
-                    positions = positions + output["velocity"] / num_steps
-                    positions[~batch.movable_mask] = batch.reactant_pos[~batch.movable_mask]
+                frozen = ~batch.movable_mask
+
+                def field(state, time):
+                    batch.pos = state
+                    batch.flow_time = time.reshape(1, 1).expand(batch.num_graphs, 1)
+                    velocity = model(batch, t=batch.flow_time.squeeze(-1))["velocity"]
+                    return torch.where(frozen[:, None], torch.zeros_like(velocity), velocity)
+
+                positions, _ = sample_ode(field, batch.pos.clone(), num_steps=num_steps,
+                                          atol=solver_atol, rtol=solver_rtol, method=integrator)
                 event_id = batch.event_id[0]
-                target = catalog.event_target(event_id, active_threshold=active_threshold)
-                generated = StructureRecord(
-                    f"{event_id}:{initializer.seed_type}:rollout",
+                target = event_target(catalog.events[event_id])
+                generated = Structure(
                     list(target.reactant.species),
                     positions.detach().cpu().numpy(),
                     cell=target.reactant.cell,
@@ -147,7 +150,6 @@ DEFAULT_CONFIG = {
     "data": {
         "events_dir": _default_events_dir(),
         "pbc_override": "auto",
-        "active_threshold": "0.1",
     },
     "output": {
         "output_dir": "runs/au_product_flow",
@@ -180,9 +182,7 @@ DEFAULT_CONFIG = {
     },
     "loss": {
         "velocity_weight": "1.0",
-        "active_weight": "0.0",
-        "direction_weight": "0.0",
-        "active_pos_weight": "auto",
+        "norm": "mse",
     },
     "runtime": {
         "device": "auto",
@@ -191,8 +191,8 @@ DEFAULT_CONFIG = {
         "gpu_count": "1",
     },
     "evaluation": {
-        "eval_num_steps": "8",
-        "eval_graph_update_interval": "2",
+        "eval_num_steps": "50",
+        "integrator": "dopri5",
     },
 }
 
@@ -312,7 +312,6 @@ def _resolved_config(args: argparse.Namespace) -> configparser.ConfigParser:
     config["data"] = {
         "events_dir": str(args.events_dir),
         "pbc_override": "auto" if args.pbc_override is None else ",".join(str(v).lower() for v in args.pbc_override),
-        "active_threshold": str(args.active_threshold),
     }
     config["output"] = {
         "output_dir": str(args.output_dir),
@@ -345,9 +344,7 @@ def _resolved_config(args: argparse.Namespace) -> configparser.ConfigParser:
     }
     config["loss"] = {
         "velocity_weight": str(args.velocity_weight),
-        "active_weight": str(args.active_weight),
-        "direction_weight": str(args.direction_weight),
-        "active_pos_weight": str(args.active_pos_weight),
+        "norm": str(args.norm),
     }
     config["runtime"] = {
         "device": str(args.device),
@@ -357,7 +354,9 @@ def _resolved_config(args: argparse.Namespace) -> configparser.ConfigParser:
     }
     config["evaluation"] = {
         "eval_num_steps": str(args.eval_num_steps),
-        "eval_graph_update_interval": str(args.eval_graph_update_interval),
+        "integrator": str(args.integrator),
+        "solver_atol": str(args.solver_atol),
+        "solver_rtol": str(args.solver_rtol),
     }
     return config
 
@@ -368,10 +367,13 @@ def _write_resolved_config(args: argparse.Namespace, path: Path) -> None:
         config.write(file)
 
 
-def _config_or_cli(raw_args: argparse.Namespace, config: configparser.ConfigParser, attr: str, section: str, key: str, cast):
+def _config_or_cli(raw_args: argparse.Namespace, config: configparser.ConfigParser, attr: str,
+                   section: str, key: str, cast, default=None):
     value = getattr(raw_args, attr)
     if value is not None:
         return value
+    if default is not None and not config.has_option(section, key):
+        return default
     return cast(_get_config_value(config, section, key))
 
 
@@ -397,7 +399,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--test", type=float, default=None)
     parser.add_argument("--seed", type=int, default=None)
     parser.add_argument("--pbc-override", type=_parse_pbc_override, default=None)
-    parser.add_argument("--active-threshold", type=float, default=None)
     parser.add_argument("--gaussian-scale", type=float, default=None)
     parser.add_argument(
         "--init-types",
@@ -411,15 +412,17 @@ def parse_args() -> argparse.Namespace:
         help="Training batch size as a positive integer, or 'full' for one update per epoch.",
     )
     parser.add_argument("--velocity-weight", type=float, default=None)
-    parser.add_argument("--active-weight", type=float, default=None)
-    parser.add_argument("--direction-weight", type=float, default=None)
+    parser.add_argument("--norm", choices=["mse", "l1"], default=None)
     parser.add_argument(
         "--active-pos-weight",
         default=None,
         help="Positive active-label BCE weight, or 'auto' for train-split balancing.",
     )
-    parser.add_argument("--eval-num-steps", type=int, default=None)
-    parser.add_argument("--eval-graph-update-interval", type=int, default=None)
+    parser.add_argument("--eval-num-steps", type=int, default=None,
+                        help="saved points on the integration grid (MolGEN --inference_steps)")
+    parser.add_argument("--integrator", choices=["dopri5", "euler"], default=None)
+    parser.add_argument("--solver-atol", type=float, default=None)
+    parser.add_argument("--solver-rtol", type=float, default=None)
     parser.add_argument("--log-to-stdout", action="store_true", default=None)
     parser.add_argument("--no-log-to-stdout", action="store_false", dest="log_to_stdout")
     parser.add_argument("--device", choices=["auto", "cpu", "cuda", "mps"], default=None)
@@ -454,23 +457,20 @@ def parse_args() -> argparse.Namespace:
             "pbc_override",
             _parse_pbc_override,
         ),
-        active_threshold=_config_or_cli(raw_args, config, "active_threshold", "data", "active_threshold", float),
         gaussian_scale=_config_or_cli(raw_args, config, "gaussian_scale", "init", "gaussian_scale", float),
         init_types=_config_or_cli(raw_args, config, "init_types", "init", "types", _parse_init_types),
         batch_size=_config_or_cli(raw_args, config, "batch_size", "training", "batch_size", str),
         velocity_weight=_config_or_cli(raw_args, config, "velocity_weight", "loss", "velocity_weight", float),
-        active_weight=_config_or_cli(raw_args, config, "active_weight", "loss", "active_weight", float),
-        direction_weight=_config_or_cli(raw_args, config, "direction_weight", "loss", "direction_weight", float),
-        active_pos_weight=_config_or_cli(raw_args, config, "active_pos_weight", "loss", "active_pos_weight", str),
+        norm=_config_or_cli(raw_args, config, "norm", "loss", "norm", str),
         eval_num_steps=_config_or_cli(raw_args, config, "eval_num_steps", "evaluation", "eval_num_steps", int),
-        eval_graph_update_interval=_config_or_cli(
-            raw_args,
-            config,
-            "eval_graph_update_interval",
-            "evaluation",
-            "eval_graph_update_interval",
-            int,
-        ),
+        # The solver controls default to MolGEN's, so a config written before them
+        # still runs instead of failing on a missing option.
+        integrator=_config_or_cli(raw_args, config, "integrator", "evaluation", "integrator", str,
+                                  default=DEFAULT_METHOD),
+        solver_atol=_config_or_cli(raw_args, config, "solver_atol", "evaluation", "solver_atol", float,
+                                   default=DEFAULT_ATOL),
+        solver_rtol=_config_or_cli(raw_args, config, "solver_rtol", "evaluation", "solver_rtol", float,
+                                   default=DEFAULT_RTOL),
         log_to_stdout=_config_or_cli(raw_args, config, "log_to_stdout", "output", "log_to_stdout", _parse_bool),
         device=_config_or_cli(raw_args, config, "device", "runtime", "device", str),
         cpu_threads=_config_or_cli(raw_args, config, "cpu_threads", "runtime", "cpu_threads", int),
@@ -497,26 +497,21 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     _write_resolved_config(args, output_dir / "config.resolved.ini")
 
-    catalog = EventCatalog.from_eon_directory(
-        events_dir,
-        pbc_override=args.pbc_override,
-    )
-    split = BasinSplit.create(
-        catalog,
-        train=args.train,
-        val=args.val,
-        test=args.test,
-        seed=args.seed,
-    )
+    catalog = load_events(events_dir, pbc_override=args.pbc_override)
+    split = split_events(catalog, train=args.train, val=args.val, test=args.test, seed=args.seed)
+    # Only the partitions actually used are selected: an empty partition is legal
+    # data, and selecting one must raise rather than run on nothing.
     train_catalog = split.select(catalog, "train")
-    val_catalog = split.select(catalog, "val")
-    test_catalog = split.select(catalog, "test")
-    split.save(output_dir / "split_manifest.json")
-    split_manifest = {
+    val_catalog = (
+        split.select(catalog, "val")
+        if any(value > 0.0 for value in (args.val,)) and split.val_ids
+        else train_catalog
+    )
+    test_catalog = split.select(catalog, "test") if split.test_ids else train_catalog
+    split_record = {
         "train": list(split.train_ids),
         "val": list(split.val_ids),
         "test": list(split.test_ids),
-        "seed": split.seed,
     }
 
     backend, model_config = model_spec(vars(args))
@@ -542,29 +537,9 @@ def main() -> None:
                 }
             )
     init_config = {"generators": init_config_generators}
-    active_pos_weight_text = str(args.active_pos_weight).strip().lower()
-    if active_pos_weight_text == "auto":
-        resolved_active_pos_weight = active_pos_weight(
-            train_catalog,
-            active_threshold=args.active_threshold,
-        )
-    else:
-        resolved_active_pos_weight = float(args.active_pos_weight)
-        if resolved_active_pos_weight < 0.0:
-            raise ValueError("active_pos_weight must be non-negative or 'auto'")
-    loss_weights = FlowLossWeights(
-        velocity=args.velocity_weight,
-        active=args.active_weight,
-        direction=args.direction_weight,
-        active_pos_weight=resolved_active_pos_weight,
-    )
+    loss_weights = FlowLossWeights(velocity=args.velocity_weight, norm=args.norm)
 
-    train_dataset = EventFlowDataset(
-        train_catalog,
-        init_generators,
-        active_threshold=args.active_threshold,
-        seed=args.seed,
-    )
+    train_dataset = EventFlowDataset(train_catalog, init_generators, seed=args.seed)
     batch_size = len(train_dataset) if args.batch_size == "full" else int(args.batch_size)
     if batch_size <= 0:
         raise ValueError("batch_size must be a positive integer or 'full'")
@@ -603,29 +578,28 @@ def main() -> None:
                     split_catalog,
                     init_generators,
                     num_steps=args.eval_num_steps,
-                    active_threshold=args.active_threshold,
+                    integrator=args.integrator,
+                    solver_atol=args.solver_atol,
+                    solver_rtol=args.solver_rtol,
                     device=device,
                     seed=args.seed,
                 )
                 for split_name, split_catalog in split_catalogs.items()
             }
         },
-        "init_baseline": _initialization_rmsd(
-            catalog,
-            baseline_generators,
-            active_threshold=args.active_threshold,
-        ),
+        "init_baseline": _initialization_rmsd(catalog, baseline_generators),
         "init_baseline_splits": {
             split_name: _initialization_rmsd(
                 split_catalog,
                 baseline_generators,
-                active_threshold=args.active_threshold,
             )
             for split_name, split_catalog in split_catalogs.items()
         },
         "config": {
             "num_steps": args.eval_num_steps,
-            "graph_update_interval": args.eval_graph_update_interval,
+            "integrator": args.integrator,
+            "solver_atol": args.solver_atol,
+            "solver_rtol": args.solver_rtol,
             "cutoff": args.cutoff,
         },
     }
@@ -635,7 +609,7 @@ def main() -> None:
         "model_state_dict": model.state_dict(),
         "model_config": model_config,
         "init_config": init_config,
-        "split_manifest": split_manifest,
+        "split": split_record,
         "runtime_config": runtime_config,
         "training_config": {
             "events_dir": str(events_dir),
@@ -647,20 +621,15 @@ def main() -> None:
             "test": args.test,
             "seed": args.seed,
             "pbc_override": args.pbc_override,
-            "active_threshold": args.active_threshold,
             "batch_size": args.batch_size,
-            "loss_weights": {
-                "velocity": loss_weights.velocity,
-                "active": loss_weights.active,
-                "direction": loss_weights.direction,
-                "active_pos_weight": loss_weights.active_pos_weight,
-                "active_pos_weight_source": args.active_pos_weight,
-            },
+            "loss_weights": {"velocity": loss_weights.velocity, "norm": loss_weights.norm},
             "flow_time_sampling": "uniform",
             "init_types": list(args.init_types),
             "gaussian_scale": args.gaussian_scale,
             "eval_num_steps": args.eval_num_steps,
-            "eval_graph_update_interval": args.eval_graph_update_interval,
+            "integrator": args.integrator,
+            "solver_atol": args.solver_atol,
+            "solver_rtol": args.solver_rtol,
             "device": args.device,
             "cpu_threads": args.cpu_threads,
             "gpu_ids": args.gpu_ids,
@@ -675,12 +644,12 @@ def main() -> None:
         json.dumps(eval_metrics, indent=2) + "\n",
         encoding="utf-8",
     )
-    print(f"Loaded: {len(catalog.basin_ids)} basins, {len(catalog.event_ids)} events")
+    print(f"Loaded: {len(catalog.event_ids)} events")
     print(
         "Split: "
-        f"{len(train_catalog.basin_ids)} train / "
-        f"{len(val_catalog.basin_ids)} val / "
-        f"{len(test_catalog.basin_ids)} test basins"
+        f"{len(train_catalog.event_ids)} train / "
+        f"{len(split.val_ids)} val / "
+        f"{len(test_catalog.event_ids)} test events"
     )
     print(f"Final loss: {history[-1]['loss']:.6f}")
     print(f"Runtime device: {runtime_config['device']}")
@@ -691,7 +660,7 @@ def main() -> None:
     print("Test rollout RMSD: n/a" if test_rmsd is None else f"Test rollout RMSD: {test_rmsd:.6f} Å")
     print("Oracle product init RMSD: n/a" if oracle_test is None else f"Oracle product init RMSD: {oracle_test:.6f} Å")
     print(f"Checkpoint: {checkpoint_path}")
-    print(f"Split manifest: {output_dir / 'split_manifest.json'}")
+    print(f"Split: {len(split.train_ids)}/{len(split.val_ids)}/{len(split.test_ids)} (train/val/test)")
     print(f"Training log: {output_dir / 'training.log'}")
     print(f"Eval metrics: {output_dir / 'eval_metrics.json'}")
 

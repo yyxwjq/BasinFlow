@@ -58,23 +58,18 @@ def test_transition1x_painn_runner_loads_split_and_samples_validation(tmp_path):
 
     events_dir = tmp_path / "events"
     events_dir.mkdir()
+    # The shared fixture already writes events plus a split.csv (train 0 / test 1);
+    # tag them as Transition1x and use its split as-is.
     _write_tiny_events(events_dir)
-    table = events_dir / "basin_table.csv"
-    with table.open() as source:
-        rows = list(csv.DictReader(source))
-    for index, row in enumerate(rows):
-        row["dataset_kind"] = "transition1x_single_event_molecule"
-        row["source_index"] = str(index)
-    with table.open("w", newline="") as destination:
-        writer = csv.DictWriter(destination, fieldnames=list(rows[0]))
-        writer.writeheader()
-        writer.writerows(rows)
-    manifest_path = tmp_path / "split.json"
-    manifest_path.write_text(json.dumps({"train": ["b0"], "val": ["b1"], "test": [], "seed": 42}))
+    # Re-split the two fixture events so that one lands in val, which is the arm
+    # this test scores.
+    from basinflow.data import EventSplit, save_split
+
+    save_split(EventSplit(("0",), ("1",), ()), events_dir / "split.csv")
     config = configparser.ConfigParser()
     config.read(Path("configs/0910/smoke_transition1x.ini"))
     config["data"]["events_dir"] = str(events_dir)
-    config["split"]["manifest"] = str(manifest_path)
+    config["data"]["auto_split"] = "false"
     config["output"]["output_dir"] = str(tmp_path / "output")
     config["model"]["num_features"] = "8"
     config["model"]["num_layers"] = "1"
@@ -89,5 +84,5 @@ def test_transition1x_painn_runner_loads_split_and_samples_validation(tmp_path):
     assert checkpoint["evaluation_split"] == "val"
     assert checkpoint["history"][-1]["last_step"] == 2
     report = json.loads((tmp_path / "output" / "eval_metrics.json").read_text())
-    assert report["sampling"]["num_test_basins"] == 1
+    assert report["sampling"]["num_test_events"] == 1
     assert report["relaxation"] == "not_run"

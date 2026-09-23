@@ -40,3 +40,6 @@ runs/
 
 # local HPC access helpers (credentials not tracked)
 .hpc/
+
+# local relay health-check output from tools/codex_relay_monitor.py
+codex_relay_monitor.log

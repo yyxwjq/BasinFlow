@@ -45,12 +45,6 @@ class EGNNFlow(_ModuleBase):
             nn.SiLU(),
             nn.Linear(hidden_dim, 3),
         )
-        self.active_head = nn.Linear(hidden_dim, 1)
-        self.direction_gate = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.SiLU(),
-            nn.Linear(hidden_dim, 3),
-        )
 
     def _seed_type_ids(self, batch, n_atoms: int, device):
         torch = _torch()
@@ -135,12 +129,4 @@ class EGNNFlow(_ModuleBase):
         velocity_weights = self.velocity_gate(h).unsqueeze(-1)
         velocity = (bases * velocity_weights).sum(dim=1)
         velocity = velocity * update_mask.reshape(-1, 1)
-
-        direction_weights = self.direction_gate(h).unsqueeze(-1)
-        direction = (bases * direction_weights).sum(dim=1)
-        direction = direction * update_mask.reshape(-1, 1)
-        return {
-            "velocity": velocity,
-            "active_logits": self.active_head(h).squeeze(-1),
-            "direction": direction,
-        }
+        return {"velocity": velocity}

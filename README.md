@@ -35,14 +35,21 @@ provided validation reactions. This is a fixed-budget benchmark, not a claim of
 convergence or an OAReactDiff reproduction. The experiment report is
 `docs/13_0910_engineering_report.md`.
 
-The follow-up supports explicit `[data] train_events_dir`, `val_events_dir`
-and `test_events_dir` without a `[split]` section, or a shared `events_dir`
-with `[split] manifest` without fractions. It validates disjoint basin/reaction
-identities and records `data_sources.json`. Existing run directories are not
+The follow-up supports exactly one data-source mode: `[data] events_dir`
+(a directory of `event_*.traj` / `event_*.extxyz` plus `basin_table.csv`) and an
+optional `[data] manifest` naming the `{train, val, test, seed}` basin-id lists.
+A dataset that ships its own `split_manifest.json` needs no manifest key, and a
+manifest may name an empty partition (the 0910 dataset ships `test: []`);
+selecting an empty partition raises rather than evaluating on nothing. Every
+config key is validated, so a config that still carries a removed option fails
+loudly instead of running as a missing-option experiment. `data_sources.json`
+records the directory and the manifest hash. Existing run directories are not
 overwritten. `tools/prepare_transition1x_explicit_split.py` prepares the approved
-custom 9000/536/537 partition with previously evaluated reactions pinned to val.
-See `docs/17_reference_protocol_audit.md` for the exact export command, reference
-protocol differences and current execution status.
+custom 9000/536/537 partition with previously evaluated reactions pinned to val,
+and `tools/merge_event_partitions.py` converts an older three-directory export
+into the canonical layout. See `docs/17_reference_protocol_audit.md` for the
+reference protocol differences and `docs/27_data_layer_rewrite_plan.md` for the
+data-layer contract.
 
 `configs/0910/official_pt_coverage.ini` trains five complete Pt epochs;
 `official_transition1x_explicit.ini` trains ten complete epochs and evaluates
@@ -130,19 +137,18 @@ python -m pytest tests/test_raw_events.py::test_stage2_real_events_dataset_when_
 
 | Module | Status |
 |--------|--------|
-| `StructureRecord` — unified mol/crystal schema, ASE round-trip, canonical `movable_mask` (`True` = movable) | ✅ |
-| `EventRecord` — three-frame model (R/P/TS), explicit activity labels or MIC-derived fallback | ✅ |
-| `EventCatalog` + `BasinSplit` — read-only basin grouping and persisted basin-only splits (no leakage) | ✅ |
-| `CandidateRecord` — schema for generated proposals (later stages) | ✅ |
-| EON-style event reader plus EON / Transition1x conversion tools — standard event files → `EventCatalog` | ✅ |
-| PBC-aware MIC displacement, active-atom derivation, event-direction extraction | ✅ |
+| `Structure` — mol/crystal geometry, ASE round-trip, canonical `movable_mask` (`True` = movable) | ✅ |
+| `Event` — three inlined frames (R/P/TS), validated against each other | ✅ |
+| `EventCatalog` + `BasinSplit` — basin index `dict[basin_id, [event_id]]` and persisted basin-only splits | ✅ |
+| EON-style event reader (`load_events`) plus EON / Transition1x conversion tools | ✅ |
+| PBC-aware MIC displacement and the lifted endpoint (`event_target`) | ✅ |
 | Dynamic cutoff-graph builder with cell offsets | ✅ |
 | `EventFlowDataset` (training) + `BasinDataset` (no-oracle inference) — direct PyG samples | ✅ |
 | Initialization/flow target contract with dummy product-event flow | ✅ |
 | Minimal torch training loop smoke test (`loss.backward()` + toy overfit) | ✅ |
 | Product-flow multi-graph batching with integer or `full` training batch size | ✅ |
-| Seed-conditioned EGNN product/event flow with active/direction heads | ✅ |
-| Multi-initialization candidate sampler producing `CandidateRecord` outputs | ✅ |
+| Seed-conditioned EGNN product/event flow (single `velocity` head) | ✅ |
+| Multi-initialization candidate sampler producing `Candidate` outputs | ✅ |
 | No-relaxation candidate clustering and basin-level recall report | ✅ |
 | Stage 3 train/test quality metrics (`eval_metrics.json`, rollout RMSD, oracle init RMSD) | ✅ |
 | Minimal JSON split manifest save/load for reproducible basin splits | ✅ |
@@ -156,8 +162,8 @@ entry point for `configs/semantic_flow_au.ini` and
 `configs/semantic_flow_pt.ini`.  It trains only with pairwise supervision and
 then samples each held-out reactant basin from independent `GaussianInit`
 noise.  The sampler receives reactant geometry, cell/PBC, `movable_mask`, and
-the seed itself.  It never receives a known product, `target_active_mask`, or
-`target_direction` as a model condition.
+the seed itself.  It never receives a known product or any `target_*` field: the
+inference view constructs none, so an oracle cannot reach the model by accident.
 
 The run directory contains `checkpoint.pt`, `split_manifest.json`,
 `config.resolved.ini`, `training.log`, `loss_by_epoch.csv`, and

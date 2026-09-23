@@ -5,8 +5,8 @@ from typing import Any
 
 import numpy as np
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.records import CandidateRecord, StructureRecord
+from basinflow.data import Event, EventCatalog, Structure
+from basinflow.sampling import Candidate
 from basinflow.geometry.mic import pairwise_displacements
 
 
@@ -20,9 +20,9 @@ class CandidateCluster:
 
 
 def movable_mic_rmsd(
-    a: StructureRecord,
-    b: StructureRecord,
-    reference: StructureRecord,
+    a: Structure,
+    b: Structure,
+    reference: Structure,
 ) -> float:
     """RMSD over movable atoms using reference cell/PBC for MIC wrapping."""
     if a.n_atoms != b.n_atoms or a.n_atoms != reference.n_atoms:
@@ -40,9 +40,9 @@ def movable_mic_rmsd(
 
 
 def kabsch_aligned_rmsd(
-    a: StructureRecord,
-    b: StructureRecord,
-    reference: StructureRecord,
+    a: Structure,
+    b: Structure,
+    reference: Structure,
     *,
     mirror_allowed: bool = False,
 ) -> float:
@@ -88,45 +88,73 @@ def kabsch_aligned_rmsd(
     return min(rmsd, reflected)
 
 
-def nearest_product_match(
-    candidate: StructureRecord,
+def comparison_events(
     catalog: EventCatalog,
-    basin_id: str,
-) -> dict[str, Any]:
-    """Match a candidate to its closest known product in one reactant basin."""
+    event_id: str,
+    groups: dict[str, str] | None = None,
+) -> list[Event]:
+    """The events a candidate for ``event_id`` is scored against.
+
+    Without ``groups`` that is the event itself. With a grouping table (a
+    converted dataset's ``basin_table.csv``) it is every event that shares the
+    group key, so candidates are scored against all known products of the same
+    basin rather than only the one recorded step. The event's own group must
+    always contain the event.
+    """
     if not isinstance(catalog, EventCatalog):
         raise TypeError("catalog must be an EventCatalog")
-    basin = catalog.basins[basin_id]
-    event_ids = basin.known_event_ids
-    if not event_ids:
-        raise ValueError(f"basin {basin_id!r} has no known products")
-    reactant = catalog.structures[basin.reactant_structure_id]
-    events = [catalog.events[event_id] for event_id in event_ids]
-    products = [catalog.structures[event.product_structure_id] for event in events]
+    if event_id not in catalog.events:
+        raise KeyError(f"unknown event id: {event_id!r}")
+    if groups is None:
+        return [catalog.events[event_id]]
+    key = groups.get(event_id)
+    if key is None:
+        raise KeyError(f"event {event_id!r} is missing from the grouping table")
+    members = [other for other, other_key in groups.items() if other_key == key]
+    missing = [other for other in members if other not in catalog.events]
+    if missing:
+        raise KeyError(f"group {key!r} names unknown event ids: {missing[:5]}")
+    return [catalog.events[other] for other in sorted(members, key=int)]
 
-    best_index = min(
-        range(len(products)),
-        key=lambda index: movable_mic_rmsd(candidate, products[index], reactant),
-    )
-    event = events[best_index]
-    product = products[best_index]
+
+def nearest_product_match(
+    candidate: Structure,
+    event: Event | list[Event],
+) -> dict[str, Any]:
+    """Closest known product to a candidate, over one event or a comparison set.
+
+    Returns the winning event's id, source file, product and movable-atom MIC
+    RMSD. When several events are given, the minimum over all of their products
+    is returned, which is what a basin-level comparison reports.
+    """
+    events = [event] if isinstance(event, Event) else list(event)
+    if not events or not all(isinstance(item, Event) for item in events):
+        raise TypeError("event must be an Event or a nonempty list of them")
+    scored = [
+        (
+            movable_mic_rmsd(candidate, item.product, item.reactant),
+            item,
+        )
+        for item in events
+    ]
+    rmsd, best = min(scored, key=lambda pair: pair[0])
     return {
-        "event_id": event.event_id,
-        "source_file": event.metadata.get("source_file"),
-        "product": product,
-        "rmsd_angstrom": movable_mic_rmsd(candidate, product, reactant),
+        "event_id": best.event_id,
+        "source_file": best.metadata.get("source_file"),
+        "product": best.product,
+        "rmsd_angstrom": rmsd,
     }
 
 
 def cluster_candidates(
-    candidates: list[CandidateRecord],
-    structures: dict[str, StructureRecord],
-    reactant: StructureRecord,
+    candidates: list[Candidate],
+    structures: dict[str, Structure],
+    reactant: Structure,
     threshold: float = 0.25,
 ) -> list[CandidateCluster]:
     """Greedy no-relaxation clustering by movable-atom MIC RMSD."""
     clusters: list[CandidateCluster] = []
-    representatives: list[StructureRecord] = []
+    representatives: list[Structure] = []
     for candidate in candidates:
         structure = structures[candidate.generated_structure_id]
         assigned = False
@@ -146,22 +174,27 @@ def cluster_candidates(
     return clusters
 
 
-def evaluate_basin_recall(
+def evaluate_event_recall(
     catalog: EventCatalog,
-    basin_id: str,
-    candidates: list[CandidateRecord],
-    structures: dict[str, StructureRecord],
+    event_id: str,
+    candidates: list[Candidate],
+    structures: dict[str, Structure],
     *,
     cluster_threshold: float = 0.25,
     match_threshold: float = 0.5,
+    groups: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Evaluate candidate product recall against known basin products."""
-    if not isinstance(catalog, EventCatalog):
-        raise TypeError("catalog must be an EventCatalog")
-    basin = catalog.basins[basin_id]
-    reactant = catalog.structures[basin.reactant_structure_id]
-    events = [catalog.events[event_id] for event_id in basin.known_event_ids]
-    products = [catalog.structures[event.product_structure_id] for event in events]
+    """Evaluate candidate product recall for the events a candidate is scored on.
+
+    A cluster representative is recalled when it lands within ``match_threshold``
+    (movable-atom MIC RMSD) of one of the comparison products. By default the
+    comparison set is the event itself; pass ``groups`` (a converted dataset's
+    ``basin_table.csv``) to score against every event of the same basin, which is
+    the basin-level recall of the 0910-era reports.
+    """
+    events = comparison_events(catalog, event_id, groups)
+    products = [item.product for item in events]
+    reactant = events[0].reactant
     candidate_by_id = {candidate.candidate_id: candidate for candidate in candidates}
     clusters = cluster_candidates(
         candidates,
@@ -205,7 +238,8 @@ def evaluate_basin_recall(
     num_candidates = len(candidates)
     num_clusters = len(clusters)
     return {
-        "basin_id": basin_id,
+        "evaluation_protocol": "event_level_no_oracle_no_relaxation",
+        "event_id": event_id,
         "num_known_events": num_known,
         "num_candidates": num_candidates,
         "num_clusters": num_clusters,

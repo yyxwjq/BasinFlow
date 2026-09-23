@@ -104,7 +104,7 @@ class DualMessageBlock(nn.Module):
 
     def __init__(self, features: int, num_radial_basis: int, stability_mode: str = "scaled",
                  bond_change_condition: bool = False, endpoint_condition: bool = False,
-                 endpoint_equivariant: bool = False):
+                 endpoint_equivariant: bool = False, time_features: int = 0):
         super().__init__()
         self.scaled = stability_mode in {"scaled", "bounded"}
         self.bounded = stability_mode == "bounded"
@@ -138,8 +138,16 @@ class DualMessageBlock(nn.Module):
             nn.Linear(num_radial_basis, features)
             if (self.endpoint_condition and self.endpoint_equivariant) else None
         )
+        # Optional per-layer time gate. The flow field's time dependence must
+        # survive every message-passing layer; routing it only through the input
+        # scalar features lets it wash out, and the fitted field then comes out
+        # nearly constant in t (docs/27). ``time_features=0`` keeps the previous
+        # parameter set exactly, so existing checkpoints load unchanged.
+        self.time_gate = (
+            nn.Linear(time_features, features * 4) if time_features else None
+        )
 
-    def forward(self, scalar, vector, reference_radial, current_radial, reference_cutoff, current_cutoff, reference_unit, current_unit, edge_index, bond_change=None, endpoint=None):
+    def forward(self, scalar, vector, reference_radial, current_radial, reference_cutoff, current_cutoff, reference_unit, current_unit, edge_index, bond_change=None, endpoint=None, time_embedding=None):
         receiver, sender = edge_index
         if self.bond_change_condition:
             if bond_change is None:
@@ -147,6 +155,11 @@ class DualMessageBlock(nn.Module):
             reference_radial = torch.cat([reference_radial, bond_change], dim=-1)
         filters = self.reference_filter(reference_radial) * reference_cutoff[:, None]
         filters = filters + self.current_filter(current_radial) * current_cutoff[:, None]
+        if self.time_gate is not None:
+            if time_embedding is None:
+                raise ValueError("this backbone was built with a per-layer time gate but none was passed")
+            # Gate on the *receiver's* time so every layer can re-read the clock.
+            filters = filters + self.time_gate(time_embedding)[receiver]
         endpoint_radial = endpoint_cutoff = endpoint_unit = None
         if self.endpoint_condition:
             if endpoint is None:

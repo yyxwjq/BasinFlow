@@ -17,6 +17,8 @@ models = [
   "scipy",
   "torch",
   "torch-geometric",
+  # MolGEN's sampler: odeint(method="dopri5"), see basinflow/sampling/ode.py
+  "torchdiffeq",
 ]
 dev = [
   "pre-commit",

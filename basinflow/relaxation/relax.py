@@ -5,9 +5,9 @@ potential format. The caller supplies a configured calculator, so exactly the
 same code path relaxes with an empirical potential (EAM, EMT), a DFT code
 (GPAW, VASP, ...), or a machine-learned potential (MACE, CHGNet, ...); this
 module only drives the optimizer and converts the result back to a
-:class:`~basinflow.data.records.StructureRecord`.
+:class:`~basinflow.data.structures.Structure`.
 
-FixAtoms is not set here: ``StructureRecord.to_ase`` already derives it from
+FixAtoms is not set here: ``Structure.to_ase`` already derives it from
 ``movable_mask``, so fixed atoms stay fixed for every calculator.
 """
 from __future__ import annotations
@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
-from basinflow.data.records import StructureRecord
+from basinflow.data.structures import Structure
 
 OPTIMIZERS = ("FIRE", "BFGS", "LBFGS")
 
@@ -39,12 +39,12 @@ class RelaxationConfig:
 
 
 def relax(
-    structure: StructureRecord,
+    structure: Structure,
     calculator,
     config: RelaxationConfig | None = None,
     *,
     label: str = "relaxed",
-) -> tuple[StructureRecord, bool, int]:
+) -> tuple[Structure, bool, int]:
     """Relax ``structure`` with any ASE calculator.
 
     Returns ``(relaxed_structure, converged, optimizer_steps)``. The calculator
@@ -62,19 +62,7 @@ def relax(
     converged = bool(optimizer.run(fmax=float(config.fmax), steps=int(config.steps)))
     steps = int(getattr(optimizer, "nsteps", 0))
 
-    relaxed = StructureRecord.from_ase(
-        atoms,
-        structure_id=f"{structure.structure_id}:{label}",
-        metadata={
-            **structure.metadata,
-            "relaxation": f"{config.optimizer.lower()}_via_ase",
-            "relax_calculator": type(calculator).__name__,
-            "relax_fmax": float(config.fmax),
-            "relax_steps_limit": int(config.steps),
-            "relax_steps": steps,
-            "relax_converged": converged,
-        },
-    )
+    relaxed = Structure.from_ase(atoms)
     return relaxed, converged, steps
 
 

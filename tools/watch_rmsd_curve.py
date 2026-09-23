@@ -2,7 +2,7 @@
 
 A run that only samples at the end hides its learning curve behind the loss,
 and loss does not decide whether the benchmark target is met.  This watcher
-scores each new epoch checkpoint on a fixed basin subset and appends the result
+scores each new epoch checkpoint on a fixed event subset and appends the result
 to ``rmsd_curve.csv`` next to the run, so the trajectory is visible without
 waiting for the run to finish.
 
@@ -42,7 +42,7 @@ def _scored(output_root: Path) -> set[int]:
 
 
 def _score(script: Path, run_dir: Path, output_root: Path, checkpoint: Path,
-           basins: int, trials: int, split: str, steps: int | None) -> dict:
+           events: int, trials: int, split: str, steps: int | None) -> dict:
     epoch = int(checkpoint.stem.split("_")[1])
     output = output_root / f"epoch_{epoch:04d}"
     command = [
@@ -51,8 +51,8 @@ def _score(script: Path, run_dir: Path, output_root: Path, checkpoint: Path,
         "--checkpoint", str(checkpoint),
         "--output", str(output),
         "--split", split,
-        "--max-basins", str(basins),
-        "--trials-per-basin", str(trials),
+        "--max-events", str(events),
+        "--trials-per-event", str(trials),
     ]
     if steps is not None:
         command += ["--steps", str(steps)]
@@ -76,8 +76,8 @@ def _score(script: Path, run_dir: Path, output_root: Path, checkpoint: Path,
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--run-dir", required=True, type=Path)
-    parser.add_argument("--basins", type=int, default=128, help="basins scored per checkpoint")
-    parser.add_argument("--trials-per-basin", type=int, default=1)
+    parser.add_argument("--events", type=int, default=128, help="events scored per checkpoint")
+    parser.add_argument("--trials-per-event", type=int, default=1)
     parser.add_argument("--split", default="val")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--interval", type=float, default=60.0, help="seconds between polls")
@@ -93,8 +93,8 @@ def main() -> int:
         checkpoints = sorted((args.run_dir / "epoch_checkpoints").glob("epoch_*.pt"))
         pending = [path for path in checkpoints if int(path.stem.split("_")[1]) not in _scored(output_root)]
         for checkpoint in pending:
-            row = _score(script, args.run_dir, output_root, checkpoint, args.basins,
-                         args.trials_per_basin, args.split, args.steps)
+            row = _score(script, args.run_dir, output_root, checkpoint, args.events,
+                         args.trials_per_event, args.split, args.steps)
             new_file = not curve_path.exists()
             with curve_path.open("a", newline="", encoding="utf-8") as file:
                 writer = csv.DictWriter(file, fieldnames=FIELDS)

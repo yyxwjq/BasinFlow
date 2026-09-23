@@ -280,3 +280,10 @@ Exit criteria:
 9. ~~Implement the EGNN/PaiNN-style product-event flow backbone and sampling loop.~~ → EGNN prototype and dual-geometry PaiNN implemented; Stage 3 proposal quality remains under evaluation.
 10. ~~Add the basin-level mini benchmark before full TS-flow work.~~ → no-relaxation recall prototype complete.
 11. Select and ingest a second benchmark dataset with multi-atom or multi-element events.
+
+> **2026-09-15 更新（`docs/27`）**：本节是实现当初的 Stage 3 清单，作为历史计划保留。
+> 其中「active-atom and event-direction heads」与「active_prior versus target_active_mask」
+> 两条已被数据层重写取代：两个头与其损失项已删除，`target_active_mask`/`target_direction`
+> 不再产出，监督只剩 velocity/endpoint 目标；`CandidateRecord` 收窄为
+> `basinflow.sampling.Candidate`。以 `docs/27_data_layer_rewrite_plan.md` 与
+> `docs/03_data_schema.md` 为准。

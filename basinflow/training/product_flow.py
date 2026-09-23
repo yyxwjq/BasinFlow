@@ -1,6 +1,7 @@
 """Small PyG-based Stage 3 product-flow training loop."""
 from __future__ import annotations
 
+import copy
 from pathlib import Path
 from dataclasses import asdict
 from itertools import islice
@@ -9,8 +10,7 @@ import json
 
 import numpy as np
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.pyg import EventFlowDataset
+from basinflow.data import EventCatalog, EventFlowDataset
 from basinflow.models import FlowLossWeights, flow_loss
 
 
@@ -23,20 +23,33 @@ def _torch():
     return torch, DataLoader
 
 
-def active_pos_weight(catalog: EventCatalog, *, active_threshold: float = 0.1) -> float:
-    """Return the movable-atom negative/positive label ratio for a catalog."""
-    if not isinstance(catalog, EventCatalog):
-        raise TypeError("catalog must be an EventCatalog")
-    positives = negatives = 0
-    for event_id in catalog.event_ids:
-        target = catalog.event_target(event_id, active_threshold=active_threshold)
-        movable = np.asarray(target.reactant.movable_mask, dtype=bool)
-        positives += int(np.count_nonzero(target.active_mask & movable))
-        negatives += int(np.count_nonzero(~target.active_mask & movable))
-    return 1.0 if positives == 0 else float(negatives / positives)
+def build_ema(model, decay: float):
+    """A frozen, exponentially averaged copy of ``model``.
+
+    ReactOT evaluates the EMA weights (``train_rpsb_ts1x.py:74-76``,
+    ``ema_decay=0.999``), so a reproduction must be able to score them. Buffers
+    are copied at construction and refreshed on every step; only floating-point
+    parameters are averaged.
+    """
+    ema = copy.deepcopy(model)
+    for parameter in ema.parameters():
+        parameter.requires_grad_(False)
+    ema.eval()
+    return ema
 
 
-def _as_event_flow_dataset(dataset, initializers, *, active_threshold, flow_time):
+def update_ema(ema, model, decay: float) -> None:
+    """One EMA step: ``ema <- decay * ema + (1 - decay) * model``."""
+    import torch
+
+    with torch.no_grad():
+        for ema_parameter, parameter in zip(ema.parameters(), model.parameters()):
+            ema_parameter.mul_(decay).add_(parameter.detach(), alpha=1.0 - decay)
+        for ema_buffer, buffer in zip(ema.buffers(), model.buffers()):
+            ema_buffer.copy_(buffer)
+
+
+def _as_event_flow_dataset(dataset, initializers, *, flow_time):
     # Any prepared dataset that carries a catalog and can advance its epoch is
     # already in the right form; only a bare catalog has to be wrapped.
     if hasattr(dataset, "catalog") and hasattr(dataset, "set_epoch"):
@@ -45,12 +58,7 @@ def _as_event_flow_dataset(dataset, initializers, *, active_threshold, flow_time
         raise TypeError("dataset must be an EventFlowDataset or EventCatalog")
     if initializers is None:
         raise TypeError("initializers are required when dataset is an EventCatalog")
-    return EventFlowDataset(
-        dataset,
-        initializers,
-        active_threshold=active_threshold,
-        flow_time=flow_time,
-    )
+    return EventFlowDataset(dataset, initializers, flow_time=flow_time)
 
 
 def _batch_size(value, dataset) -> int:
@@ -70,14 +78,18 @@ def _dataset_signature(dataset):
         'event_ids': dataset.catalog.event_ids,
         'initializers': [repr(value) for value in getattr(dataset, 'initializers', ())],
         'seed': dataset.seed, 'flow_time': dataset.fixed_flow_time,
-        'active_threshold': getattr(dataset, 'active_threshold', 0.0),
         'diagnostic_oracle': getattr(dataset, 'diagnostic_oracle', False),
     }, sort_keys=True).encode())
     for event_id in dataset.catalog.event_ids:
         event = dataset.catalog.events[event_id]
-        digest.update(json.dumps(asdict(event), sort_keys=True, default=str).encode())
-        for identifier in (event.reactant_structure_id, event.product_structure_id):
-            structure = dataset.catalog.structures[identifier]
+        digest.update(json.dumps({
+            'event_id': event.event_id,
+            'metadata': {key: str(value) for key, value in event.metadata.items()},
+            'has_transition_state': event.transition_state is not None,
+        }, sort_keys=True).encode())
+        for structure in (event.reactant, event.product, event.transition_state):
+            if structure is None:
+                continue
             digest.update(json.dumps(structure.species).encode())
             for values in (structure.positions, structure.cell, structure.pbc, structure.movable_mask):
                 digest.update(np.ascontiguousarray(values).tobytes())
@@ -95,11 +107,12 @@ def train_product_flow_epoch(
     loss_weights: FlowLossWeights | None = None,
     start_step: int = 0,
     log_step=None,
-    active_threshold: float = 0.1,
     t: float | None = None,
     max_steps: int | None = None,
     max_grad_norm: float | None = 10.0,
     scheduler=None,
+    ema=None,
+    ema_decay: float = 0.0,
 ) -> dict[str, float]:
     """Train one epoch from ``EventFlowDataset`` PyG samples."""
     if max_steps is not None and max_steps <= 0:
@@ -112,15 +125,10 @@ def train_product_flow_epoch(
         initializers = None
     else:
         initializers = initializers_or_optimizer
-    dataset = _as_event_flow_dataset(
-        dataset,
-        initializers,
-        active_threshold=active_threshold,
-        flow_time=t,
-    )
+    dataset = _as_event_flow_dataset(dataset, initializers, flow_time=t)
     batch_size = _batch_size(batch_size, dataset)
     model.train()
-    totals = {"loss": 0.0, "velocity_loss": 0.0, "active_loss": 0.0, "direction_loss": 0.0}
+    totals = {"loss": 0.0, "velocity_loss": 0.0}
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
     batches = 0
     num_items = 0
@@ -141,13 +149,13 @@ def train_product_flow_epoch(
         optimizer.step()
         if scheduler is not None:
             scheduler.step()
+        if ema is not None:
+            update_ema(ema, model, float(ema_decay))
         batches += 1
         num_items += int(batch.num_graphs)
         values = {
             "loss": float(loss.detach().cpu()),
             "velocity_loss": float(parts["velocity_loss"].detach().cpu()),
-            "active_loss": float(parts["active_loss"].detach().cpu()),
-            "direction_loss": float(parts["direction_loss"].detach().cpu()),
         }
         for name, value in values.items():
             totals[name] += value
@@ -170,14 +178,11 @@ def evaluate_product_flow_velocity(
     *,
     device=None,
     batch_size: int | str = 1,
-    active_threshold: float = 0.1,
     t: float | None = None,
 ) -> dict[str, float]:
     """Evaluate fixed epoch-zero pairwise movable-coordinate velocity MSE."""
     torch, DataLoader = _torch()
-    dataset = _as_event_flow_dataset(
-        dataset, initializers, active_threshold=active_threshold, flow_time=t
-    )
+    dataset = _as_event_flow_dataset(dataset, initializers, flow_time=t)
     if len(dataset) == 0:
         raise ValueError("validation dataset must contain at least one item")
     batch_size = _batch_size(batch_size, dataset)
@@ -231,7 +236,6 @@ def train_product_flow(
     device=None,
     batch_size: int | str = 1,
     loss_weights: FlowLossWeights | None = None,
-    active_threshold: float = 0.1,
     t: float | None = None,
     max_steps: int | None = None,
     max_grad_norm: float | None = 10.0,
@@ -245,6 +249,7 @@ def train_product_flow(
     warmup_fraction: float = 0.0,
     min_lr_fraction: float = 0.0,
     resume_from: str | Path | None = None,
+    ema_decay: float | None = None,
 ) -> list[dict[str, float]]:
     """Train a model from an ``EventFlowDataset`` without dict conversion."""
     if epochs <= 0:
@@ -259,18 +264,15 @@ def train_product_flow(
         raise ValueError("lr must be finite and nonnegative")
     if not np.isfinite(weight_decay) or weight_decay < 0:
         raise ValueError("weight_decay must be finite and nonnegative")
+    if ema_decay is not None:
+        if not np.isfinite(ema_decay) or not 0.0 <= float(ema_decay) < 1.0:
+            raise ValueError("ema_decay must be in [0, 1) or None")
+        ema_decay = float(ema_decay)
     torch, _ = _torch()
-    dataset = _as_event_flow_dataset(
-        dataset,
-        initializers,
-        active_threshold=active_threshold,
-        flow_time=t,
-    )
+    ema = build_ema(model, ema_decay) if ema_decay is not None else None
+    dataset = _as_event_flow_dataset(dataset, initializers, flow_time=t)
     if validation_dataset is not None:
-        validation_dataset = _as_event_flow_dataset(
-            validation_dataset, initializers,
-            active_threshold=active_threshold, flow_time=t,
-        )
+        validation_dataset = _as_event_flow_dataset(validation_dataset, initializers, flow_time=t)
         if len(validation_dataset) == 0:
             raise ValueError("validation dataset must contain at least one item")
         validation_batch_size = _batch_size(
@@ -304,6 +306,8 @@ def train_product_flow(
                      'warmup_fraction': float(warmup_fraction),
                      'min_lr_fraction': float(min_lr_fraction),
                      'loss_weights': asdict(loss_weights or FlowLossWeights())}
+        if ema_decay is not None:
+            requested['ema_decay'] = ema_decay
         if any(saved['config'].get(key) != value for key, value in requested.items()):
             raise ValueError('resume optimizer, batch, or loss configuration differs')
         completed_epochs = int(saved['completed_epochs'])
@@ -311,6 +315,8 @@ def train_product_flow(
         if epochs <= completed_epochs or (max_steps is not None and max_steps <= resume_step):
             raise ValueError('resume budget must exceed completed training')
         model.load_state_dict(saved['model_state_dict'], strict=True)
+        if ema is not None and saved.get('ema_model_state_dict') is not None:
+            ema.load_state_dict(saved['ema_model_state_dict'], strict=True)
         optimizer.load_state_dict(saved['optimizer_state_dict'])
         torch.set_rng_state(saved['torch_rng_state'])
         if torch.cuda.is_available() and saved.get('cuda_rng_state_all'):
@@ -333,6 +339,8 @@ def train_product_flow(
                 "epoch_complete": epoch_complete,
                 "budget_truncated": budget_truncated,
                 "training_dataset_sha256": signature,
+                "ema_model_state_dict": None if ema is None else ema.state_dict(),
+                "ema_decay": ema_decay,
                 "config": {
                     "epochs": int(epochs),
                     "lr": float(lr),
@@ -340,7 +348,6 @@ def train_product_flow(
                     "amsgrad": amsgrad,
                     "weight_decay": float(weight_decay),
                     "batch_size": batch_size,
-                    "active_threshold": float(active_threshold),
                     "max_steps": max_steps,
                     "max_grad_norm": max_grad_norm,
                     "scheduler_name": scheduler_name,
@@ -349,6 +356,7 @@ def train_product_flow(
                     "loss_weights": asdict(loss_weights or FlowLossWeights()),
                     "diagnostic_oracle": dataset.diagnostic_oracle,
                     "dataset_seed": dataset.seed,
+                    "ema_decay": ema_decay,
                     "completed_steps": step,
                     "validation_dataset_seed": None if validation_dataset is None else validation_dataset.seed,
                     "validation_epoch": None if validation_dataset is None else 0,
@@ -369,9 +377,9 @@ def train_product_flow(
         output_path = Path(log_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
         output = output_path.open("w", encoding="utf-8")
-        output.write("epoch step total_loss velocity_loss active_loss direction_loss\n")
+        output.write("epoch step total_loss velocity_loss\n")
     if log_to_stdout:
-        print("epoch step total_loss velocity_loss active_loss direction_loss", flush=True)
+        print("epoch step total_loss velocity_loss", flush=True)
     try:
         step = resume_step
         for epoch in range(completed_epochs + 1, epochs + 1):
@@ -380,8 +388,7 @@ def train_product_flow(
             def log_step(step_index, values):
                 line = (
                     f"{epoch} {step_index} {values['loss']:.8f} "
-                    f"{values['velocity_loss']:.8f} {values['active_loss']:.8f} "
-                    f"{values['direction_loss']:.8f}"
+                    f"{values['velocity_loss']:.8f}"
                 )
                 if output is not None:
                     output.write(line + "\n")
@@ -398,11 +405,12 @@ def train_product_flow(
                 loss_weights=loss_weights,
                 start_step=step,
                 log_step=log_step,
-                active_threshold=active_threshold,
                 t=t,
                 max_steps=None if max_steps is None else max_steps - step,
                 max_grad_norm=max_grad_norm,
                 scheduler=scheduler,
+                ema=ema,
+                ema_decay=0.0 if ema_decay is None else float(ema_decay),
             )
             step = int(metrics["last_step"])
             if validation_dataset is not None:

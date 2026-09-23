@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from ase.io import read
 
-from basinflow.data.raw_events import load_eon_catalog
+from basinflow.data import event_target, load_events
 
 
 def _write_transition1x_fixture(path):
@@ -82,35 +82,29 @@ def test_transition1x_converter_writes_standard_event_directory(tmp_path):
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
+    # Event ids are the export positions 0..N-1, so split.csv can hold integers.
     assert [path.name for path in sorted(output_dir.glob("event_*.traj"))] == [
         "event_0.traj",
-        "event_2.traj",
+        "event_1.traj",
     ]
-    with (output_dir / "basin_table.csv").open(newline="", encoding="utf-8") as file:
-        rows = list(csv.DictReader(file))
-    assert [(row["file"], row["basin"]) for row in rows] == [
-        ("event_2.traj", "transition1x:2"),
-        ("event_0.traj", "transition1x:0"),
-    ]
-    assert rows[0]["dataset_kind"] == "transition1x_single_event_molecule"
-    assert rows[0]["source_index"] == "2"
+    assert not (output_dir / "basin_table.csv").exists()
 
-    frames = read(output_dir / "event_2.traj", index=":")
+    frames = read(output_dir / "event_0.traj", index=":")
     assert len(frames) == 3
     assert frames[0].get_chemical_symbols() == ["N", "H"]
     assert frames[0].get_pbc().tolist() == [False, False, False]
     assert np.allclose(frames[0].get_positions().mean(axis=0), 0.0)
+    # The source row stays identifiable through each frame's info.
     assert frames[0].info["source_index"] == 2
     assert frames[0].info["dataset_kind"] == "transition1x_single_event_molecule"
 
-    catalog = load_eon_catalog(output_dir)
-    assert catalog.event_ids == ["event_2", "event_0"]
-    assert catalog.basin_ids == ["transition1x:2", "transition1x:0"]
-    target = catalog.event_target("event_2", active_threshold=0.01)
+    catalog = load_events(output_dir)
+    assert catalog.event_ids == ["0", "1"]
+    target = event_target(catalog.events["0"])
     assert target.reactant.species == ["N", "H"]
     assert np.allclose(target.transition_state.positions.mean(axis=0), 0.0)
-    assert catalog.structures["event_2:reactant"].metadata["source_index"] == 2
-    assert catalog.events["event_2"].metadata["dataset_kind"] == "transition1x_single_event_molecule"
+    assert int(catalog.events["0"].metadata["source_index"]) == 2
+    assert catalog.events["0"].metadata["dataset_kind"] == "transition1x_single_event_molecule"
 
 
 def test_transition1x_converter_rejects_unknown_selection(tmp_path):
@@ -146,11 +140,10 @@ def test_transition1x_single_fragment_filter_intersects_selection(tmp_path, sele
     )
 
     assert result.returncode == 0, result.stderr + result.stdout
-    with (output_dir / "basin_table.csv").open(newline="", encoding="utf-8") as table_file:
-        rows = list(csv.DictReader(table_file))
-    assert [int(row["source_index"]) for row in rows] == expected_indices
-    for row in rows:
-        frames = read(output_dir / row["file"], index=":")
+    written = sorted(output_dir.glob("event_*.traj"), key=lambda item: int(item.stem.split("_")[1]))
+    assert [int(read(path, index=0).info["source_index"]) for path in written] == expected_indices
+    for path in written:
+        frames = read(path, index=":")
         assert all(frame.info["single_fragment_only"] is True for frame in frames)
         assert all(frame.info["single_fragment"] is True for frame in frames)
 
@@ -183,7 +176,7 @@ def test_transition1x_complement_preserves_source_partition(tmp_path):
     rows = converter(source, output_dir, selection="complement")
 
     assert [row["source_index"] for row in rows] == ["1"]
-    frames = read(output_dir / "event_1.traj", index=":")
+    frames = read(output_dir / "event_0.traj", index=":")
     assert all(frame.info["selection"] == "complement" for frame in frames)
 
 
@@ -256,55 +249,66 @@ def test_transition1x_indices_json_cli(tmp_path, indices, succeeds):
         assert not output_dir.exists()
         return
     assert result.returncode == 0, result.stderr + result.stdout
-    with (output_dir / "basin_table.csv").open(newline="", encoding="utf-8") as table_file:
-        rows = list(csv.DictReader(table_file))
-    assert [int(row["source_index"]) for row in rows] == indices
+    written = sorted(output_dir.glob("event_*.traj"), key=lambda item: int(item.stem.split("_")[1]))
+    assert [int(read(path, index=0).info["source_index"]) for path in written] == indices
 
 
-@pytest.mark.parametrize("failure", [None, "overlap", "identity"])
 @pytest.mark.parametrize("align_product", [False, True])
-def test_transition1x_benchmark_preserves_source_partitions(tmp_path, failure, align_product):
-    train_source = tmp_path / "train_addprop.pkl"
-    valid_source = tmp_path / "valid_addprop.pkl"
+def test_transition1x_converter_writes_partition_directories(tmp_path, align_product):
+    """``--split-file`` expresses train/val/test as directories, not as a manifest."""
+    source = tmp_path / "train.pkl"
     output_dir = tmp_path / "prepared"
-    _write_transition1x_fixture(train_source)
-    with train_source.open("rb") as source_file:
-        train_raw = pickle.load(source_file)
-    train_raw["use_ind"] = [2, 1]
-    with train_source.open("wb") as source_file:
-        pickle.dump(train_raw, source_file)
-    train_raw["use_ind"] = [0] if failure != "overlap" else [2]
-    train_raw["product"]["positions"][0] = np.array([[4.0, 0.0, 0.0], [6.0, 0.0, 0.0]])
-    if failure == "identity":
-        train_raw["reactant"]["rxn"][0] = "different-reaction"
-    with valid_source.open("wb") as source_file:
-        pickle.dump(train_raw, source_file)
+    _write_transition1x_fixture(source)
+    split_file = tmp_path / "split.json"
+    split_file.write_text(json.dumps({"train": [2], "val": [1], "test": [0]}))
 
     result = subprocess.run(
-        [sys.executable, "tools/prepare_transition1x_split.py", str(train_source),
-         str(valid_source), str(output_dir)] + (["--align-product-to-reactant"] if align_product else []),
+        [sys.executable, "tools/transition1x_to_events.py", str(source), str(output_dir),
+         "--selection", "all", "--split-file", str(split_file)]
+        + (["--align-product-to-reactant"] if align_product else []),
         check=False, capture_output=True, text=True,
     )
 
-    if failure:
-        assert result.returncode != 0
-        assert failure in result.stderr
-        assert not output_dir.exists()
-        return
     assert result.returncode == 0, result.stderr + result.stdout
-    split = json.loads((output_dir / "split_manifest.json").read_text())
-    assert split == {"train": ["transition1x:2"], "val": ["transition1x:0"], "test": [], "seed": 0}
-    catalog = load_eon_catalog(output_dir / "events")
-    assert len(catalog.events) == 2
-    assert np.allclose(catalog.structures["event_0:product"].positions, [[-1, 0, 0], [1, 0, 0]])
-    assert catalog.structures["event_0:product"].metadata["source_file"] == str(valid_source)
-    provenance = json.loads((output_dir / "source_partitions.json").read_text())
-    assert provenance["partition_method"] == "source_use_ind"
-    assert provenance["single_fragment_only"] is True
-    assert provenance["align_product_to_reactant"] is align_product
-    assert provenance["sources"]["train"]["selected_count"] == 1
-    assert provenance["sources"]["val"]["selected_count"] == 1
-    assert len(provenance["sources"]["val"]["sha256"]) == 64
+    counts = {
+        name: len(list((output_dir / name).glob("event_*.traj")))
+        for name in ("train", "val", "test")
+    }
+    assert counts == {"train": 1, "val": 1, "test": 1}
+    for name in counts:
+        assert not (output_dir / name / "basin_table.csv").exists()
+    # Event ids are global to the export, so each partition keeps a disjoint slice
+    # of 0..N-1 and nothing has to be renumbered when the partitions are merged.
+    written = {
+        name: sorted(
+            (output_dir / name).glob("event_*.traj"),
+            key=lambda item: int(item.stem.split("_")[1]),
+        )
+        for name in ("train", "val", "test")
+    }
+    assert [path.name for path in written["train"]] == ["event_0.traj"]
+    assert [path.name for path in written["val"]] == ["event_1.traj"]
+    assert [path.name for path in written["test"]] == ["event_2.traj"]
+    frames = read(written["val"][0], index=":")
+    assert int(frames[0].info["source_index"]) == 1
+    if align_product:
+        assert frames[1].info["coordinate_convention"] == "proper_kabsch_to_reactant"
+
+
+def test_transition1x_split_file_rejects_unknown_and_overlapping_rows(tmp_path):
+    source = tmp_path / "train.pkl"
+    _write_transition1x_fixture(source)
+    converter = runpy.run_path("tools/transition1x_to_events.py")["convert_transition1x"]
+
+    with pytest.raises(ValueError, match="outside the selection"):
+        converter(source, tmp_path / "a", selection="all", partitions={"train": [5]})
+    assert not (tmp_path / "a").exists()
+
+    with pytest.raises(ValueError, match="overlap"):
+        converter(
+            source, tmp_path / "b", selection="all", partitions={"train": [0], "val": [0]}
+        )
+    assert not (tmp_path / "b").exists()
 
 
 def _write_alignment_fixture(path, reactant, product, forces, state=None):
@@ -376,7 +380,7 @@ def test_product_alignment_removes_independent_rotation_and_rotates_forces(tmp_p
 def test_product_alignment_preserves_chirality_and_target_free_inference(tmp_path):
     torch = pytest.importorskip("torch")
     pytest.importorskip("torch_geometric")
-    from basinflow.data.pyg import BasinDataset
+    from basinflow.data import EventProposalDataset
     from basinflow.seeds import ZeroInit
 
     converter = runpy.run_path("tools/transition1x_to_events.py")["convert_transition1x"]
@@ -390,11 +394,11 @@ def test_product_alignment_preserves_chirality_and_target_free_inference(tmp_pat
     assert np.linalg.det(frames[1].positions[1:] - frames[1].positions[0]) == pytest.approx(
         np.linalg.det(product[1:] - product[0])
     )
-    catalog = load_eon_catalog(tmp_path / "events")
-    before = BasinDataset(catalog, [ZeroInit()])[0]
-    catalog.structures["event_0:product"].positions[:] += 30
-    catalog.structures["event_0:transition_state"].positions[:] -= 20
-    after = BasinDataset(catalog, [ZeroInit()])[0]
+    catalog = load_events(tmp_path / "events")
+    before = EventProposalDataset(catalog, [ZeroInit()])[0]
+    catalog.events["0"].product.positions[:] += 30
+    catalog.events["0"].transition_state.positions[:] -= 20
+    after = EventProposalDataset(catalog, [ZeroInit()])[0]
     assert not any(key.startswith("target_") for key in after.keys())
     assert set(before.keys()) == set(after.keys())
     for key in before.keys():
@@ -450,3 +454,38 @@ def test_frame_alignment_rejects_periodic_structures():
     reactant = Atoms("H2", positions=[[0, 0, 0], [1, 0, 0]], cell=np.eye(3) * 5, pbc=True)
     with pytest.raises(ValueError, match="nonperiodic"):
         align(reactant, reactant.copy())
+
+
+def test_converter_writes_an_optional_group_table_keyed_by_reaction(tmp_path):
+    """``--basin-table`` maps every event to its source reaction, for evaluation."""
+    source = tmp_path / "train.pkl"
+    output_dir = tmp_path / "events"
+    _write_transition1x_fixture(source)
+    converter = runpy.run_path("tools/transition1x_to_events.py")["convert_transition1x"]
+
+    rows = converter(source, output_dir, selection="all", write_groups=True)
+
+    table = output_dir / "basin_table.csv"
+    assert table.is_file()
+    written = list(csv.DictReader(table.open(newline="", encoding="utf-8")))
+    assert [row["event_id"] for row in written] == [row["event_id"] for row in rows]
+    assert all(row["basin"] for row in written)
+
+    # The table loads against the exported catalog and groups same-reaction rows.
+    from basinflow.data import load_groups, load_events
+
+    catalog = load_events(output_dir)
+    groups = load_groups(table, catalog)
+    assert set(groups) == set(catalog.event_ids)
+
+
+def test_converter_refuses_to_overwrite_an_existing_group_table(tmp_path):
+    source = tmp_path / "train.pkl"
+    output_dir = tmp_path / "events"
+    _write_transition1x_fixture(source)
+    converter = runpy.run_path("tools/transition1x_to_events.py")["convert_transition1x"]
+    output_dir.mkdir()
+    (output_dir / "basin_table.csv").write_text("event_id,basin\n")
+
+    with pytest.raises(FileExistsError, match="group table"):
+        converter(source, output_dir, selection="all", write_groups=True)

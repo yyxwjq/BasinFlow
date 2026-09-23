@@ -8,34 +8,43 @@ import tempfile
 
 
 def parse_loss_points(text: str) -> list[tuple[float, float]]:
-    """Return ``(epoch, total_loss)`` points from a whitespace table.
+    """Return ``(epoch, total_loss)`` points from a loss table.
 
-    ``epoch`` is preferred when present. For logs with only ``step`` and
-    ``total_loss``, the step column is treated as the epoch axis.
+    Accepts both whitespace-separated ``training.log`` output and the
+    comma-separated ``loss_by_epoch.csv`` artifact. ``epoch`` is preferred when
+    present; for logs with only ``step`` and ``total_loss``, the step column is
+    treated as the epoch axis.
     """
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
         raise ValueError("input is empty")
 
+    # loss_by_epoch.csv is comma-separated while training.log is whitespace
+    # separated; pick the delimiter from the header line so both parse.
     header_index = None
     header: list[str] | None = None
     for index, line in enumerate(lines):
-        columns = line.split()
-        if "total_loss" in columns and ("epoch" in columns or "step" in columns):
-            header_index = index
-            header = columns
+        for delimiter in (None, ","):
+            columns = line.split(delimiter)
+            columns = [column.strip() for column in columns]
+            if "total_loss" in columns and ("epoch" in columns or "step" in columns):
+                header_index = index
+                header = columns
+                break
+        if header is not None:
             break
 
     if header_index is None or header is None:
         raise ValueError("could not find a header with total_loss and epoch or step")
 
+    delimiter = "," if "," in lines[header_index] else None
     x_name = "epoch" if "epoch" in header else "step"
     x_index = header.index(x_name)
     loss_index = header.index("total_loss")
     points: list[tuple[float, float]] = []
 
     for line in lines[header_index + 1 :]:
-        columns = line.split()
+        columns = [column.strip() for column in line.split(delimiter)]
         if len(columns) <= max(x_index, loss_index):
             continue
         try:

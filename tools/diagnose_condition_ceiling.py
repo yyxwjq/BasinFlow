@@ -30,8 +30,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data.catalog import EventCatalog
-from basinflow.data.records import StructureRecord
+from basinflow.data import Structure, event_target, load_events
 from basinflow.evaluation.basin_recall import movable_mic_rmsd
 from basinflow.geometry.bonds import BROKEN, FORMED, bond_adjacency, bond_change_labels
 
@@ -71,10 +70,10 @@ def _composition(species) -> str:
 
 
 def _load(events_dir: str, max_atoms: int) -> list[dict]:
-    catalog = EventCatalog.from_eon_directory(events_dir)
+    catalog = load_events(events_dir)
     records = []
     for event_id in catalog.event_ids:
-        target = catalog.event_target(event_id)
+        target = event_target(catalog.events[event_id])
         reactant = target.reactant
         if reactant.n_atoms > max_atoms:
             continue
@@ -134,8 +133,7 @@ def main() -> int:
             )[: args.neighbours]
             predictions = [_transfer(item, query) for item in ranked]
             prediction = query["reactant"].positions + np.mean(predictions, axis=0)
-            predicted = StructureRecord(
-                structure_id="nn",
+            predicted = Structure(
                 species=list(query["product"].species),
                 positions=prediction,
                 cell=query["product"].cell.copy(),
