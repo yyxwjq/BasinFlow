@@ -271,6 +271,7 @@ def run_transition1x_ts(config_path: Path | str) -> dict[str, Any]:
             "early_stopping_patience", fallback=None
         ),
         best_checkpoint_path=output_dir / "best.pt" if bridge_validation_dataset is not None else None,
+        save_every_n_epochs=config["training"].getint("save_every_n_epochs", fallback=1),
         epoch_checkpoint_dir=output_dir / "epoch_checkpoints" if config["training"].getboolean(
             "save_each_epoch", fallback=False) else None,
         optimizer_name=config["training"].get("optimizer", "adam"),

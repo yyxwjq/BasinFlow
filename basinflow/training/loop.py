@@ -268,6 +268,7 @@ def train_loop(
     validation_max_batches: int | None = 20,
     early_stopping_patience: int | None = None,
     best_checkpoint_path: str | Path | None = None,
+    save_every_n_epochs: int = 1,
 ) -> list[dict[str, float]]:
     """Train a model from a prepared event dataset."""
     if epochs <= 0:
@@ -295,6 +296,8 @@ def train_loop(
         raise ValueError("early_stopping_patience must be a positive integer or None")
     if validation_max_batches is not None and int(validation_max_batches) <= 0:
         raise ValueError("validation_max_batches must be a positive integer or None")
+    if int(save_every_n_epochs) <= 0:
+        raise ValueError("save_every_n_epochs must be a positive integer")
     torch, _ = _torch()
     ema = build_ema(model, ema_decay) if ema_decay is not None else None
     best_score = float("inf")
@@ -409,6 +412,7 @@ def train_loop(
                     "validation_max_num": int(validation_max_num),
                     "validation_max_batches": validation_max_batches,
                     "early_stopping_patience": early_stopping_patience,
+                    "save_every_n_epochs": int(save_every_n_epochs),
                     "best_val_scaled_err": None if best_score == float("inf") else best_score,
                     "best_epoch": best_epoch,
                     "early_stopped": early_stopped,
@@ -538,7 +542,10 @@ def train_loop(
             budget_truncated = (
                 max_steps is not None and step >= max_steps and completed_epochs < epochs
             )
-            if epoch_checkpoint_dir is not None:
+            if (
+                epoch_checkpoint_dir is not None
+                and epoch % int(save_every_n_epochs) == 0
+            ):
                 save_checkpoint(Path(epoch_checkpoint_dir) / f"epoch_{epoch:04d}.pt")
             if max_steps is not None and step >= max_steps:
                 break

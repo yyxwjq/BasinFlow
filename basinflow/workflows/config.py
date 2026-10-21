@@ -38,6 +38,7 @@ ALLOWED: dict[str, frozenset[str]] = {
         "resume_from", "ema_decay", "batch_sampler", "max_num", "grad_clip",
         "limit_train_batches", "validation_split", "val_max_num", "limit_val_batches",
         "early_stopping_patience", "swap_reactant_product", "init_checkpoint",
+        "save_every_n_epochs",
     }),
     "bridge": frozenset({"timesteps", "beta_max", "power", "inv_power", "t_eps"}),
     "loss": frozenset({"velocity_weight", "norm"}),

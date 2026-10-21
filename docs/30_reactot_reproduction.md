@@ -156,6 +156,10 @@ Reference behaviour that is now implemented (no longer listed as a deviation):
 * **Plain-MSE objective.** `SBModule.compute_loss` returns `EnSB.forward`'s
   `F.mse_loss(pred, label)`; the `scales = [1, 2, 1]` normalisation belongs to
   `DDPMModule` and does not apply to the bridge (`models/loss.py`).
+* **Checkpoint cadence.** `save_each_epoch = true` combined with
+  `save_every_n_epochs` (default 10 in the kit) writes a resumable checkpoint every
+  N epochs; the training state is always written once at the end. Saving all 3000
+  epochs would be several hundred GB.
 * **200 batches per epoch.** `[training] limit_train_batches` defaults to 200 for
   the bridge, so 3000 epochs is exactly the reference's 600k steps and the sampler
   reshuffles on the reference's cadence.
@@ -303,6 +307,7 @@ optimizer = adamw
 amsgrad = true
 weight_decay = 0.0
 save_each_epoch = true
+save_every_n_epochs = 10
 batch_sampler = node2
 max_num = 2800
 grad_clip = adaptive
