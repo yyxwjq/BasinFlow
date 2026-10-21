@@ -1,7 +1,7 @@
 """``EventData`` -> LEFTNet adapter for the ``R + P -> TS`` bridge.
 
-This is the BasinFlow side of the port. It rebuilds the reference's
-multi-fragment tensor layout from BasinFlow's graph batch:
+It rebuilds the reference's multi-fragment tensor layout from BasinFlow's graph
+batch:
 
     ReactOT                                    here
     ----------------------------------------- --------------------------------
@@ -14,15 +14,10 @@ multi-fragment tensor layout from BasinFlow's graph batch:
     ``net_eps_xh[self.idx][:, :3]``                 TS block of ``pos_out - pos``
     ``self.remove_mean_batch(vel, combined_mask)``  :func:`remove_mean_batch`
 
-Only the TS block is returned, and it is mean-removed per sample exactly as
-``reactot/dynamics/egnn_dynamics.py:206-218`` does; ``fixed_idx = [0, 2]``
-discards the R/P blocks, so they are never read out here.
-
-Equivalence note (must be stated with any result): ReactOT first builds *every*
-same-sample edge and then masks the ones beyond ``cutoff`` to zero inside
-``LEFTNet``; this adapter drops those edges up front. Masked edges contribute
-zero messages, and ``LEFTNet`` computes distances after a per-component mean
-removal (translation only), so the two are identical for the same cutoff.
+Only the TS block is returned, mean-removed per sample as
+``reactot/dynamics/egnn_dynamics.py:206-218`` does; the R/P blocks are discarded.
+Edges beyond ``cutoff`` are dropped here rather than masked to zero inside
+``LEFTNet``, which is equivalent for the same cutoff.
 """
 from __future__ import annotations
 
@@ -44,14 +39,49 @@ _MAX_ATOMIC_NUMBER = 118
 FRAGMENT_ORDER = ("reactant", "transition_state", "product")
 
 
+class _OneLayerActivation(nn.Module):
+    """``reactot/model/core.py:OneLayerActivation`` (same state-dict names)."""
+
+    def __init__(self, in_dim: int, out_dim: int, *, activate: bool) -> None:
+        super().__init__()
+        self.linear = nn.Linear(in_dim, out_dim)
+        self.activation = nn.SiLU() if activate else nn.Identity()
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        return self.activation(self.linear(inputs))
+
+
+class _MLP(nn.Module):
+    """``reactot/model/core.py:MLP`` with ``last_layer_no_activation=True``.
+
+    The reference embeds the six categorical/charge columns of each fragment
+    (``node_nfs - pos_dim = 6``) through a learned 6 -> 12 -> 6 MLP before the
+    LEFTNet message passing. It also decodes the feature block back to six
+    channels; positions never depend on the decoder, but its parameters are part
+    of the reference checkpoint, so it is kept to load the state dict strictly.
+    """
+
+    def __init__(self, in_dim: int, out_dims: tuple[int, ...]) -> None:
+        super().__init__()
+        layers: list[nn.Module] = []
+        width = in_dim
+        for index, out_dim in enumerate(out_dims):
+            layers.append(
+                _OneLayerActivation(width, out_dim, activate=index < len(out_dims) - 1)
+            )
+            width = out_dim
+        self.mlp = nn.Sequential(*layers)
+
+    def forward(self, inputs: Tensor) -> Tensor:
+        return self.mlp(inputs)
+
+
 class LeftNetBridge(nn.Module):
     """``R + P -> TS`` scorer: LEFTNet over the reference 3-fragment layout.
 
-    ``forward`` returns ``{"scaled": net_out}`` where ``net_out`` is the bridge
-    regression target the reference fits, ``(x_t - x_0) / sigma_t``
-    (``reactot/diffusion/en_sb.py:245-250``). The ``R + P -> TS`` task has no
-    seed and no velocity field, so this backend deliberately does **not** emit
-    the ``{"velocity": ...}`` key that the flow backends use.
+    ``forward`` returns ``{"scaled": net_out}``, the bridge regression target
+    ``(x_t - x_0) / sigma_t`` (``reactot/diffusion/en_sb.py:245-250``); no
+    ``{"velocity": ...}`` key is emitted.
 
     ``t`` is the normalised bridge time ``t_sb in (0, 1]`` (``1`` = the
     ``(R + P) / 2`` prior, ``-> 0`` = the transition state), matching
@@ -98,6 +128,15 @@ class LeftNetBridge(nn.Module):
         # Node features: one-hot(Z) + Z (the reference's "charge" column, which is
         # the atomic number) + bridge time + condition placeholder.
         self.in_hidden_channels = self.num_elements + 3
+        # The reference keeps one encoder/decoder per fragment (R | TS | P), even
+        # though all three see identical features; their weights differ.
+        self.embed_dim = self.num_elements + 1
+        self.encoders = nn.ModuleList(
+            [_MLP(self.embed_dim, (2 * self.embed_dim, self.embed_dim)) for _ in FRAGMENT_ORDER]
+        )
+        self.decoders = nn.ModuleList(
+            [_MLP(self.embed_dim, (2 * self.embed_dim, self.embed_dim)) for _ in FRAGMENT_ORDER]
+        )
 
         lookup = torch.zeros(_MAX_ATOMIC_NUMBER + 1, dtype=torch.long)
         for index, atomic_number in enumerate(vocab):
@@ -136,11 +175,20 @@ class LeftNetBridge(nn.Module):
         return mapped
 
     def _node_features(self, z: Tensor, time_nodes: Tensor) -> Tensor:
+        """The 8-column LEFTNet input: encoder(6) | bridge time | condition.
+
+        Mirrors ``EGNNDynamics.forward``: each fragment's six categorical/charge
+        columns go through its own encoder, then the time and condition columns are
+        appended for all three fragments.
+        """
         categories = self._categories(z)
         one_hot = F.one_hot(categories, num_classes=self.num_elements).to(torch.float32)
         charge = z.to(torch.float32).unsqueeze(-1)
-        condition = torch.zeros_like(time_nodes)
-        return torch.cat([one_hot, charge, time_nodes, condition], dim=-1)
+        base = torch.cat([one_hot, charge], dim=-1)
+        encoded = torch.cat([encoder(base) for encoder in self.encoders], dim=0)
+        time_all = torch.cat([time_nodes, time_nodes, time_nodes], dim=0)
+        condition = torch.zeros_like(time_all)
+        return torch.cat([encoded, time_all, condition], dim=-1)
 
     def _edges(self, pos: Tensor, combined: Tensor, fragment: Tensor):
         """Same-sample edges within ``cutoff``, plus the same-fragment mask."""
@@ -175,8 +223,7 @@ class LeftNetBridge(nn.Module):
         else:
             time_nodes = time[index].unsqueeze(-1)
 
-        features = self._node_features(z, time_nodes)
-        h = torch.cat([features, features, features], dim=0)
+        h = self._node_features(z, time_nodes)
         pos = torch.cat([reactant, state, endpoint], dim=0)
         combined = torch.cat([index, index, index], dim=0)
         fragment = torch.cat(

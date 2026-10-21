@@ -1,10 +1,5 @@
 """Bond graphs and the bond-change label.
 
-The bond-change condition tells the model *which bonds break or form*, without
-handing it any product coordinate. It is the discrete part of a reaction: the
-geometry follows from it, so it carries the information that an R-only model is
-otherwise missing (see ``docs/18`` section 11 and ``docs/19`` section 6).
-
 Labels are defined per atom pair:
 
 ===  ==========
@@ -13,9 +8,8 @@ Labels are defined per atom pair:
  2   broken  (bond in the reactant, not in the product)
 ===  ==========
 
-At training time the product graph is supervision; at inference the same labels
-must come from the seed as a proposed topology change. Passing a product graph
-into a basin-level proposal is leakage and is not what this module is for.
+At training time the product graph is supervision; at inference the labels come
+from the seed as a proposed topology change.
 """
 from __future__ import annotations
 
@@ -36,10 +30,8 @@ def bond_adjacency(
 ) -> np.ndarray:
     """Boolean ``[N, N]`` bond graph from covalent radii, obeying minimum image.
 
-    A pair is bonded when its distance is below ``scale`` times the sum of the
-    two covalent radii, which is the same criterion MolGEN uses for its fragment
-    partition (``prep_data.ipynb``, ``mult=1.50``) and is deliberately stricter
-    here so that a bond means a chemical bond rather than a near contact.
+    A pair is bonded when its distance is below ``scale`` times the sum of the two
+    covalent radii.
     """
     from ase.data import covalent_radii
 
@@ -90,13 +82,7 @@ def fragment_count(bonds: np.ndarray) -> int:
 
 
 def preserves_fragments(reactant_bonds: np.ndarray, product_bonds: np.ndarray) -> bool:
-    """Whether a reactant/product pair keeps the same number of bonded fragments.
-
-    Transition1x contains both local rearrangements and dissociations whose
-    product is a separated fragment pair (28.9% of the test split at any
-    covalent-radius scale between 1.3 and 1.5).  Only the former are events a
-    basin-level proposer is asked for, so the benchmark reports them separately.
-    """
+    """Whether a reactant/product pair keeps the same number of bonded fragments."""
     return fragment_count(reactant_bonds) == fragment_count(product_bonds)
 
 

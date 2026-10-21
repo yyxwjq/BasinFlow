@@ -1,18 +1,16 @@
 """Sampling and scoring for the ReactOT ``R + P -> TS`` bridge.
 
 The flow backends in :mod:`basinflow.evaluation.transition_state` integrate a
-*velocity* field with an increasing time variable. The bridge is defined the
-other way round: generation starts at the midpoint prior ``(R + P) / 2`` at
-bridge time ``t_sb = 1`` and walks down to ``t_sb -> 0``, where the field is
+*velocity* field with an increasing time variable. The bridge runs the other way:
+generation starts at the midpoint prior ``(R + P) / 2`` at bridge time ``t_sb = 1``
+and walks down to ``t_sb -> 0``, where the field is
 ``dx/dt_sb = net_out * sqrt(beta / t_sb)``
 (``reactot/diffusion/en_sb.py:415-424``, ``net_out = (x_t - x_0) / sigma_t``).
 
-:func:`basinflow.models.sb.make_bridge_ode_field` performs the change of
-variable to ``progress = 1 - t_sb`` so :func:`basinflow.sampling.ode.sample_ode`
-can integrate an increasing interval. This module is the counterpart of
-``run_transition_state_trials``: it drives that field, applies the movement
-constraint, and reports BasinFlow's strict RMSD next to the ReactOT reference
-protocol so the two are never mixed up.
+:func:`basinflow.models.sb.make_bridge_ode_field` performs the change of variable to
+``progress = 1 - t_sb`` so :func:`basinflow.sampling.ode.sample_ode` can integrate an
+increasing interval. This module drives that field, applies the movement constraint,
+and reports BasinFlow's strict RMSD next to the ReactOT reference protocol.
 """
 from __future__ import annotations
 
@@ -24,8 +22,11 @@ from typing import Any
 import numpy as np
 
 from basinflow.data import EventCatalog, Structure
-from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd
-from basinflow.evaluation.reactot_metrics import REACTOT_REFERENCE_PROTOCOL, dual_protocol_rmsd
+from basinflow.evaluation.reactot_metrics import (
+    REACTOT_REFERENCE_PROTOCOL,
+    dual_protocol_rmsd,
+    kabsch_aligned_rmsd,
+)
 from basinflow.models.sb import DEFAULT_T_EPS, SBSchedule, make_bridge_ode_field
 from basinflow.sampling.ode import DEFAULT_METHOD, sample_ode
 
@@ -87,14 +88,11 @@ def run_bridge_trials(
     """Integrate the bridge field from the midpoint prior and score the proposal.
 
     ``num_steps`` is the number of saved points on ``torchdiffeq``'s output grid;
-    the solver chooses its own step sizes, exactly as in the flow runner.
-    ``solver_atol``/``solver_rtol`` default to the reference's ``1e-2``
-    (``evaluation.py`` defaults), not to the flow runner's tighter values,
-    because ReactOT reports its numbers with the looser tolerance.
+    the solver chooses its own step sizes. ``solver_atol``/``solver_rtol`` default
+    to the reference's ``1e-2``.
 
-    The model is expected to return ``{"scaled": ...}`` for the transition-state
-    block, i.e. ``(x_t - x_0) / sigma_t``; a model that emits a velocity field
-    cannot be scored here.
+    The model must return ``{"scaled": ...}`` for the transition-state block, i.e.
+    ``(x_t - x_0) / sigma_t``.
     """
     if not isinstance(catalog, EventCatalog):
         raise TypeError("catalog must be an EventCatalog")

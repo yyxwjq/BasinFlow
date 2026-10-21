@@ -1,10 +1,7 @@
 """Reading and validating a workflow INI config.
 
-Validation is two-sided. Required keys must be present, and *every* key present
-must be declared here. The second half matters more than it looks: a config that
-still carries a removed option would otherwise keep running as an experiment
-missing exactly that option, and the resulting number would be attributed to the
-wrong recipe.
+Validation is two-sided: required keys must be present, and every key present must
+be declared here.
 """
 from __future__ import annotations
 
@@ -17,7 +14,6 @@ from pathlib import Path
 ALLOWED: dict[str, frozenset[str]] = {
     "data": frozenset({
         "events_dir", "auto_split", "regenerate_split",
-        "pbc_override", "training_scope",
     }),
     "output": frozenset({"output_dir", "log_to_stdout"}),
     "split": frozenset({"train", "val", "test", "seed"}),
@@ -39,7 +35,9 @@ ALLOWED: dict[str, frozenset[str]] = {
         "epochs", "max_steps", "lr", "batch_size", "optimizer", "amsgrad",
         "weight_decay", "max_grad_norm", "scheduler", "warmup_fraction",
         "min_lr_fraction", "validate_each_epoch", "save_each_epoch", "seed",
-        "resume_from", "ema_decay",
+        "resume_from", "ema_decay", "batch_sampler", "max_num", "grad_clip",
+        "limit_train_batches", "validation_split", "val_max_num", "limit_val_batches",
+        "early_stopping_patience", "swap_reactant_product", "init_checkpoint",
     }),
     "bridge": frozenset({"timesteps", "beta_max", "power", "inv_power", "t_eps"}),
     "loss": frozenset({"velocity_weight", "norm"}),
@@ -80,12 +78,7 @@ def read_config(
 
 
 def optional_section(config: configparser.ConfigParser, name: str) -> Mapping[str, str]:
-    """A section, or an empty mapping when the config does not have it.
-
-    Some workflows legitimately need no such section -- the bridge backend has no
-    seed, no prior and no flow time -- and ``ConfigParser.getfloat(section, ...)``
-    raises for a missing section even when a ``fallback`` is supplied.
-    """
+    """A section, or an empty mapping when the config does not have it."""
     return config[name] if config.has_section(name) else {}
 
 
@@ -97,18 +90,3 @@ def parse_bool(value: str) -> bool:
     if normalized in {"false", "0", "no", "off"}:
         return False
     raise ValueError(f"expected a boolean, got {value!r}")
-
-
-def parse_pbc_override(text: str | None):
-    """Parse ``auto``/empty (keep the file's flags) or three comma-separated booleans.
-
-    ``auto`` is the common case: an EON event file can carry a cell while declaring
-    no periodicity along any axis, and the file is the authority on that.
-    """
-    value = str(text or "").strip().lower()
-    if value in {"", "auto", "none"}:
-        return None
-    tokens = [token.strip() for token in value.split(",")]
-    if len(tokens) != 3 or any(token not in {"true", "false"} for token in tokens):
-        raise ValueError("pbc_override must be auto or three comma-separated true/false values")
-    return [token == "true" for token in tokens]

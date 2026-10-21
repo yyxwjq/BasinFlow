@@ -1,12 +1,11 @@
 """Tensor-level radius graphs in pure PyTorch.
 
 These build graphs directly from batched tensors, with no ``Structure`` and no
-ASE, because a flow backbone rebuilds its graph at every integration step.
+ASE. The module requires torch at import time.
 
 The single caller-facing entry point is
-:func:`basinflow.geometry.graph.torch_neighbor_graph_from_batch`, which wraps
-these primitives; this module holds the implementation and requires torch at
-import time, so it is only imported by model and sampling code.
+:func:`basinflow.geometry.graph.torch_neighbor_graph_from_batch`, which wraps these
+primitives.
 """
 from __future__ import annotations
 

@@ -1,31 +1,18 @@
-"""The object-aware LEFTNet backbone, ported from the ReactOT reference.
+"""The object-aware LEFTNet backbone, following the ReactOT reference.
 
-Provenance: ``reactot/model/leftnet.py:576-890`` (``LEFTNet``) and
-``:428-457`` (``nn_vector``). The tensor-in/tensor-out contract is kept
-identical to the reference so the port can be compared against
-``reactot/model/leftnet.py`` line by line; the ``EventData`` adaptation lives in
-:mod:`basinflow.models.leftnet.adapter` instead.
+The tensor-in/tensor-out contract is identical to ``reactot/model/leftnet.py``
+(``LEFTNet``, ``nn_vector``); the ``EventData`` adaptation lives in
+:mod:`basinflow.models.leftnet.adapter`.
 
 ``torch_scatter`` is replaced by :func:`basinflow.models.leftnet.layers.scatter_sum`
-inside ``EquiMessage.aggregate``; ``assert_rot_equiv`` (a debug helper) is not
-ported. The switch semantics (``reflect_equiv``, ``object_aware``, ``legacy``,
-``update``, ``single_layer_output``, ``pos_grad``) are preserved exactly.
+inside ``EquiMessage.aggregate``; ``assert_rot_equiv`` is not ported. The switch
+semantics (``reflect_equiv``, ``object_aware``, ``legacy``, ``update``,
+``single_layer_output``, ``pos_grad``) match the reference.
 
-One deliberate numerical deviation
-----------------------------------
-The reference normalises cross products with ``sqrt(sum(v ** 2)) + EPS``, i.e.
-the epsilon sits *outside* the square root while ``EPS = 1e-6`` is added to the
-denominator. Whenever a cross product is exactly zero -- which happens for
-parallel atom pairs in the edge frame and for collinear ``(a, b)`` in the node
-frame -- ``sqrt`` has derivative ``inf`` at its input and the backward pass
-returns ``nan``. That is a property of the reference formulas, not of this port:
-it reproduces with untouched reference code and zeroes the gradients of an
-otherwise well-conditioned batch.
-
-The fix here is minimal and semantic-free: ``EPS_SQ = 1e-12`` is added *inside*
-each of those square roots. The forward value changes by at most ``1e-6``
-relative, and the singular derivative disappears. This must be quoted next to
-any claimed bitwise equivalence with ``reactot/model/leftnet.py``.
+Numerical deviation: ``EPS_SQ = 1e-12`` is added *inside* each normalisation square
+root, where the reference adds ``EPS`` outside it. The forward value differs by at
+most ``1e-6`` relative, and the ``inf``/``nan`` derivative of ``sqrt`` at an exactly
+zero cross product disappears.
 """
 from __future__ import annotations
 
@@ -57,12 +44,10 @@ EPS_SQ = 1e-12
 
 
 def nn_vector(dist: Tensor, edge_index: Tensor, pos: Tensor) -> Tensor:
-    """Nearest-neighbour position, used to build the node frame (non-legacy).
+    """Nearest-neighbour position, used to build the node frame.
 
-    Port of ``reactot/model/leftnet.py:428-457``: for every atom pick the
-    position of its nearest neighbour (by ``dist``) as the reference direction.
-    Kept as an explicit loop for parity with the reference; it is only reached
-    when ``legacy=False``.
+    For every atom, the position of its nearest neighbour by ``dist``, following
+    ``reactot/model/leftnet.py``. Only reached when ``legacy=False``.
     """
     ii, jj = edge_index
     vec = []
@@ -92,10 +77,9 @@ class LEFTNet(nn.Module):
         num_radial: Number of radial basis functions.
         in_hidden_channels: Width of the input node features ``h``.
         reflect_equiv: When ``True`` the frame is reflection invariant (the
-            reference's ``reflect_equiv``), which matches scoring after a
-            chirality-ignoring RMSD.
-        legacy: Reference's legacy node-frame construction (nearest-neighbour
-            frame). The ReactOT default config uses ``True``.
+            reference's ``reflect_equiv``).
+        legacy: Reference's ``legacy`` node-frame construction (nearest-neighbour
+            frame); ``True`` in the ReactOT default config.
         update: Run the per-layer :class:`EquiUpdate`.
         single_layer_output: One gated equivariant output block instead of two.
         object_aware: Mask inter-fragment edges with ``subgraph_mask``.

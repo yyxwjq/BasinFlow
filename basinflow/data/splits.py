@@ -1,10 +1,8 @@
 """Event-level train/val/test selection, stored as ``split.csv`` next to the events.
 
-One event is one unit: it is trained on, evaluated on and assigned to a partition
-as a whole. The split is a plain three-column CSV of integer event ids --
-``train,val,test`` -- so it is readable without this package, and the ids are
-positions in :func:`basinflow.data.events.ordered_event_ids`, which is the
-contract that keeps an existing split valid for a fixed events directory.
+The split is a three-column CSV of integer event ids -- ``train,val,test`` -- in
+:func:`basinflow.data.events.ordered_event_ids` order, and each event is assigned
+to a partition as a whole.
 """
 from __future__ import annotations
 
@@ -84,43 +82,6 @@ def split_events(
 def all_in_train(catalog: EventCatalog) -> EventSplit:
     """Every event in train, with empty val and test partitions."""
     return EventSplit(train_ids=tuple(ordered_event_ids(catalog)))
-
-
-def split_events_by_group(
-    catalog: EventCatalog,
-    groups: dict[str, str],
-    *,
-    train: float = 0.7,
-    val: float = 0.15,
-    test: float = 0.15,
-    seed: int = 42,
-) -> EventSplit:
-    """Split whole groups, never their members.
-
-    ``groups`` maps event id to a group key (for a converted dataset, the source
-    reaction). All events of a group land in one partition, so nothing that shares
-    a group can be trained and tested on at once.
-    """
-    missing = [event_id for event_id in catalog.event_ids if event_id not in groups]
-    if missing:
-        raise ValueError(f"events without a group key: {missing[:5]}")
-    buckets: dict[str, list[str]] = {}
-    for event_id in ordered_event_ids(catalog):
-        buckets.setdefault(str(groups[event_id]), []).append(event_id)
-    group_keys = sorted(buckets)
-    counts = _partition_counts(len(group_keys), train=train, val=val, test=test)
-    np.random.default_rng(seed).shuffle(group_keys)
-    train_count, val_count = counts
-    chunks = {
-        "train": group_keys[:train_count],
-        "val": group_keys[train_count : train_count + val_count],
-        "test": group_keys[train_count + val_count :],
-    }
-    return EventSplit(
-        train_ids=tuple(sorted(event_id for key in chunks["train"] for event_id in buckets[key])),
-        val_ids=tuple(sorted(event_id for key in chunks["val"] for event_id in buckets[key])),
-        test_ids=tuple(sorted(event_id for key in chunks["test"] for event_id in buckets[key])),
-    )
 
 
 def _partition_counts(count: int, *, train: float, val: float, test: float) -> tuple[int, int]:
@@ -207,48 +168,6 @@ def load_split(path: str | Path, catalog: EventCatalog) -> EventSplit:
     )
 
 
-def load_groups(path: str | Path, catalog: EventCatalog) -> dict[str, str]:
-    """Read a two-column ``event_id,basin`` comparison table.
-
-    The table is a *converted dataset's* side file (``basin_table.csv``): it says
-    which recorded steps belong to the same basin so that evaluation can score a
-    candidate against every known product of that basin. Training never reads it.
-
-    Rows for events the catalog does not contain are skipped, so the same table may
-    describe a whole dataset while a caller loads one partition of it. An event of
-    the catalog that the table omits is a separate concern: the caller decides what
-    to do about it (see :func:`basinflow.data.events.comparison_groups`).
-
-    Raises:
-        FileNotFoundError: If ``path`` does not exist.
-        ValueError: If the header is wrong or an id repeats.
-    """
-    source = Path(path)
-    if not source.is_file():
-        raise FileNotFoundError(f"group table not found: {source}")
-    groups: dict[str, str] = {}
-    with source.open("r", newline="", encoding="utf-8") as handle:
-        reader = csv.reader(handle)
-        try:
-            header = [cell.strip() for cell in next(reader)]
-        except StopIteration:
-            raise ValueError(f"group table {source} is empty") from None
-        if header[:2] != ["event_id", "basin"]:
-            raise ValueError(
-                f"group table {source} must start with the header event_id,basin, got {header}"
-            )
-        for row in reader:
-            if len(row) < 2 or not row[0].strip():
-                continue
-            event_id, basin_id = row[0].strip(), row[1].strip()
-            if event_id not in catalog.events:
-                continue
-            if event_id in groups:
-                raise ValueError(f"group table {source} names event id {event_id!r} twice")
-            groups[event_id] = basin_id
-    return groups
-
-
 def resolve_split(
     events_dir: str | Path,
     catalog: EventCatalog,
@@ -258,17 +177,14 @@ def resolve_split(
     val: float = 0.15,
     test: float = 0.15,
     seed: int = 42,
-    groups: dict[str, str] | None = None,
     regenerate: bool = False,
     log: Any = print,
 ) -> tuple[EventSplit, dict[str, Any]]:
     """Resolve the split for an events directory, creating ``split.csv`` if asked.
 
-    ``auto=True`` splits the catalog (whole groups when ``groups`` is given) and
-    writes ``split.csv`` next to the events. An existing file is reused unless
-    ``regenerate`` is set, so a run never silently changes which events are held
-    out. ``auto=False`` reads the existing file and, when there is none, puts every
-    event in train instead of inventing a split.
+    ``auto=True`` splits the catalog and writes ``split.csv`` next to the events. An existing file is reused unless
+    ``regenerate`` is set. ``auto=False`` reads the existing file and, when there is
+    none, puts every event in train.
     """
     directory = Path(events_dir)
     target = split_path(directory)
@@ -279,12 +195,7 @@ def resolve_split(
             provenance.update({"split_file": str(target), "split_mode": "reused"})
             log(f"[data] auto_split=true and {target} exists; reusing it (delete it to resplit)")
             return split, provenance
-        if groups is None:
-            split = split_events(catalog, train=train, val=val, test=test, seed=seed)
-        else:
-            split = split_events_by_group(
-                catalog, groups, train=train, val=val, test=test, seed=seed
-            )
+        split = split_events(catalog, train=train, val=val, test=test, seed=seed)
         save_split(split, target)
         provenance.update(
             {

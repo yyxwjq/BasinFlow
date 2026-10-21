@@ -1,10 +1,8 @@
-"""Basin-level-free evaluation of the R+P -> TS task.
+"""Evaluation of the R+P -> TS task.
 
-Both endpoints are inputs here, exactly as in ReactOT and MolGEN, so no seed or
-active-region machinery is involved: the model starts from the midpoint bridge
-and is scored against the recorded transition state. Metrics follow the same
-shape as the R -> P report (aligned, clipped, best-of) so the two tasks can be
-put side by side.
+Both endpoints are inputs, as in ReactOT and MolGEN: the model starts from the
+midpoint bridge and is scored against the recorded transition state. Metrics have
+the same shape as the R -> P report (aligned, clipped, best-of).
 """
 from __future__ import annotations
 
@@ -15,9 +13,12 @@ from typing import Any
 
 import numpy as np
 
-from basinflow.data import EventCatalog, Structure, event_target
-from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd
-from basinflow.evaluation.reactot_metrics import REACTOT_REFERENCE_PROTOCOL, dual_protocol_rmsd
+from basinflow.data import EventCatalog, Structure
+from basinflow.evaluation.reactot_metrics import (
+    REACTOT_REFERENCE_PROTOCOL,
+    dual_protocol_rmsd,
+    kabsch_aligned_rmsd,
+)
 from basinflow.sampling.ode import DEFAULT_ATOL, DEFAULT_RTOL, DEFAULT_METHOD, sample_ode
 
 _RMSD_CLIP = 1.0
@@ -38,11 +39,9 @@ _TRIAL_COLUMNS = [
 def _write_trajectory(path: Path, positions: np.ndarray, species: list[str], info: dict) -> None:
     """Write one trial's integration path as a multi-frame extended XYZ file.
 
-    Frames are the solver's `saved` points on the integration grid (``num_steps``
-    of them, ``x0`` at t=0 through the proposal at t=1). The adaptive solver takes
-    its own internal steps between them; the saved grid is dense interpolation, the
-    same convention as MolGEN's ``--inference_steps``. ``extxyz`` is
-    self-describing, so a path can be re-analysed without the code that wrote it.
+    Frames are the solver's saved points on the integration grid (``num_steps`` of
+    them, ``x0`` at t=0 through the proposal at t=1), the same convention as
+    MolGEN's ``--inference_steps``.
     """
     from ase import Atoms
     from ase.io import write
@@ -108,20 +107,13 @@ def run_transition_state_trials(
 
     Sampling solves the ODE of the trained field with MolGEN's solver --
     ``torchdiffeq.odeint(method="dopri5")`` over a ``linspace(0, 1, num_steps)``
-    output grid (``basinflow.sampling.ode``) -- so it must match training on three
-    points (``docs/25``):
-
-    * the source is drawn from the *same* distribution as training
-      (``source_scale``), not fixed at the bridge, otherwise the trajectory
-      starts outside the region the field was fitted on;
-    * the field is queried at the *current* time on every evaluation;
-    * the step size follows the local error instead of a fixed ``1 / num_steps``
-      grid, which is what stopped the earlier fixed-step runs from walking off
-      the fitted manifold.
+    output grid (:mod:`basinflow.sampling.ode`) -- with the source drawn from the
+    same distribution as training, the field queried at the current time, and the
+    step size following the local error.
 
     ``num_steps`` is the number of saved points on that grid, as in MolGEN's
     ``--inference_steps``; the solver chooses the actual step sizes. The head is
-    read as a velocity, which is the only thing the objective fits.
+    read as a velocity.
 
     ``write_trajectories`` additionally stores every trial's integration path
     under ``sampling/trajectories/`` (one extended-XYZ file per trial) and
@@ -143,9 +135,8 @@ def run_transition_state_trials(
 
     from basinflow.data import TransitionStateDataset
 
-    # A pinned-time (deterministic-bridge) model has no time law to draw from:
-    # the sampler's uniform 0 -> 1 grid *is* its grid. Map it so the legacy arm
-    # stays runnable, while the reported law keeps the configured name.
+    # A pinned-time model has no time law to draw from: the sampler's uniform 0 -> 1
+    # grid is used, while the reported law keeps the configured name.
     sampling_law = "uniform" if time_distribution == "fixed" else time_distribution
 
     torch, DataLoader = _torch()
@@ -161,8 +152,7 @@ def run_transition_state_trials(
     sampling_dir.mkdir(parents=True, exist_ok=True)
     model.eval()
 
-    # Species are read from the catalog rather than carried through the graph
-    # batch; they are constant per event and only needed when writing.
+    # Species are constant per event and read from the catalog when writing.
     species_by_event = {
         event_id: list(catalog.events[event_id].reactant.species)
         for event_id in available

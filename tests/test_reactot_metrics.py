@@ -1,9 +1,8 @@
 """The ReactOT reference protocol must be reproducible from first principles.
 
-These tests pin the *definition* rather than a run: mirror allowed, capped at
-1.0 A, reported next to (never instead of) BasinFlow's strict proper-rotation
-value. They also guard the arithmetic that a dual-protocol table depends on, so
-a silent change of the cap or of the mirror branch cannot slip through.
+These tests pin the definition -- mirror allowed, capped at ``1.0`` A, reported
+next to BasinFlow's strict proper-rotation value -- and the arithmetic that a
+dual-protocol table depends on.
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ from basinflow.evaluation.reactot_metrics import (
     reactot_reference_rmsd,
     summarize_rmsds,
 )
-from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd
+from basinflow.evaluation.reactot_metrics import kabsch_aligned_rmsd
 
 # A chiral four-point set: no proper rotation maps it onto its z-mirror, which is
 # what makes the mirror branch observable.

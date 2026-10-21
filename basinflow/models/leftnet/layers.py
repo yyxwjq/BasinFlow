@@ -1,27 +1,18 @@
-"""LEFTNet layers: a faithful port of the reference ReactOT message-passing stack.
+"""LEFTNet layers: the ReactOT reference message-passing stack.
 
-Provenance (read, not copied wholesale): ``reactot/model/leftnet.py`` classes
-``RBFEmb``, ``NeighborEmb``, ``CFConvS2V``, ``GCLMessage``, ``EquiMessage``,
-``EquiUpdate``, ``vector``, ``EquiOutput``, ``GatedEquivariantBlock``; and
-``reactot/model/core.py`` (``ACTIVATION_MAPPING``, ``OneLayerActivation``,
-``MLP``).
+Follows ``reactot/model/leftnet.py`` (``RBFEmb``, ``NeighborEmb``, ``CFConvS2V``,
+``GCLMessage``, ``EquiMessage``, ``EquiUpdate``, ``vector``, ``EquiOutput``,
+``GatedEquivariantBlock``) and ``reactot/model/core.py`` (``ACTIVATION_MAPPING``,
+``OneLayerActivation``, ``MLP``).
 
-Two deliberate adaptations, both required by this repository's rules:
+``torch_scatter.scatter``/``scatter_mean`` and
+``util_funcs.unsorted_segment_sum`` are re-implemented locally
+(:func:`scatter_sum`, :func:`scatter_mean`, :func:`unsorted_segment_sum`), so this
+package does not require ``torch_scatter``. ``MessagePassing`` comes from
+``torch_geometric``, with only the aggregation overridden.
 
-* ``torch_scatter.scatter`` / ``scatter_mean`` and
-  ``util_funcs.unsorted_segment_sum`` are re-implemented locally
-  (:func:`scatter_sum`, :func:`scatter_mean`, :func:`unsorted_segment_sum`), so
-  BasinFlow keeps its "no ``torch_scatter``" guarantee while the reference repo
-  still runs against the PyG shim in ``tools/reactot_compat``.
-* ``MessagePassing`` is kept from ``torch_geometric`` (already a ``models``
-  extra) instead of re-deriving PyG's source/target conventions by hand, which
-  is the part of the reference that is easiest to get subtly wrong. Only the
-  aggregation is overridden, where the reference calls ``torch_scatter``.
-
-Numerical note: segment reductions are exact; only the floating-point summation
-order can differ from the compiled ``torch_scatter`` kernels. That difference is
-irrelevant here because these weights are trained from scratch, not loaded from
-the reference checkpoint.
+Segment reductions are exact; only the floating-point summation order can differ
+from the compiled ``torch_scatter`` kernels.
 """
 from __future__ import annotations
 
@@ -452,10 +443,7 @@ class vector(MessagePassing):
 class GatedEquivariantBlock(nn.Module):
     """Gated equivariant block (reactot/model/leftnet.py:528-573).
 
-    Note: the reference output head deliberately has no normalisation; the
-    ``bounded`` stabilisation idea from ``docs/18`` section 12 is *not* applied
-    here so this stays a faithful port. It is instead enforced by the training
-    config (gradient clipping) until a numerical audit justifies a change.
+    The output head carries no normalisation, as in the reference.
     """
 
     def __init__(self, hidden_channels: int, out_channels: int) -> None:

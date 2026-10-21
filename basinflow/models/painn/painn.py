@@ -24,17 +24,14 @@ class DualPaiNN(nn.Module):
         if num_features < 2 or num_layers < 1 or num_elements < 2:
             raise ValueError("features/elements must be at least two and layers positive")
         self.atom_embedding = nn.Embedding(num_elements, num_features)
-        # ``time_scale`` widens the Fourier frequencies. The flow field's time
-        # dependence has to survive several message-passing layers, and the
-        # default scale proved too weak to fit even a single trajectory (docs/26).
+        # ``time_scale`` widens the Fourier frequencies.
         self.time_embedding = GaussianFourierBasis(time_dim, scale=float(time_scale))
         self.scalar_input = nn.Sequential(nn.Linear(num_features + time_dim + 2, num_features), nn.SiLU(), nn.Linear(num_features, num_features))
         self.vector_input = nn.Linear(1, num_features, bias=False)
         if bond_change_direction and not bond_change_condition:
             raise ValueError("bond_change_direction requires bond_change_condition")
         self.bond_change_direction = bool(bond_change_direction)
-        # Present only for the directional arm, so every checkpoint written
-        # before it keeps its exact state dict.
+        # Present only for the directional arm.
         self.condition_vector_input = (
             nn.Linear(1, num_features, bias=False)
             if (bond_change_condition and bond_change_direction) else None
@@ -45,8 +42,7 @@ class DualPaiNN(nn.Module):
             raise ValueError("endpoint_equivariant requires endpoint_condition")
         self.endpoint_condition = bool(endpoint_condition)
         self.endpoint_equivariant = bool(endpoint_equivariant)
-        # ``time_per_layer`` gives every message block its own view of the clock,
-        # which is what a field with genuine time dependence needs (docs/27).
+        # ``time_per_layer`` gives every message block its own view of the clock.
         gate_features = time_dim if time_per_layer else 0
         self.messages = nn.ModuleList([DualMessageBlock(num_features, num_radial_basis, stability_mode,
                                                        self.bond_change_condition,

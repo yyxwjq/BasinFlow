@@ -1,15 +1,7 @@
-"""The shared flow-matching objective: velocity only.
+"""The shared objective.
 
-This lives beside the backbones rather than inside one of them: both the EGNN
-backend and the PaiNN backbone are trained with exactly this loss, so keeping it
-inside the EGNN module made the PaiNN package import from a backend it does not use.
-
-There is one supervised term. Active-atom labels and event directions used to have
-their own heads and their own weighted terms here; both were derived quantities
-that the velocity target already determines, and a second objective fitted against
-a deterministic function of the first cannot add information -- it only lets a run
-report a lower number that means something different. Runs that used them are not
-comparable with velocity-only runs (``docs/27`` section 11).
+The PaiNN/EGNN backends fit a velocity field; the ReactOT bridge fits the
+``(x_t - x_0) / sigma_t`` residual. :func:`flow_loss` selects by output key.
 """
 from __future__ import annotations
 
@@ -71,6 +63,9 @@ def _bridge_loss(output: dict[str, Any], batch, weights: "FlowLossWeights", torc
     scaled_loss = (
         torch.mean(residual.abs()) if weights.norm == "l1" else torch.mean(residual**2)
     )
+    # ``SBModule.compute_loss`` returns ``EnSB.forward``'s plain
+    # ``F.mse_loss(pred, label)``. The ``scales = [1, 2, 1]`` normalisation lives in
+    # ``DDPMModule`` and is *not* applied to the Schrödinger-bridge objective.
     total = weights.velocity * scaled_loss
     return total, {"velocity_loss": scaled_loss.detach(), "scaled_loss": scaled_loss.detach()}
 

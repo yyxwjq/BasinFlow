@@ -125,3 +125,24 @@ def test_bridge_dataset_requires_a_transition_state() -> None:
     )
     with pytest.raises(ValueError, match="transition state"):
         BridgeFlowDataset(broken, **dict(SCHEDULE_KWARGS, seed=7))
+
+
+def test_swap_reactant_product_only_swaps_the_two_endpoints():
+    import numpy as np
+    import torch
+
+    from basinflow.data import Event, EventCatalog, Structure
+    from basinflow.data.samples import BridgeFlowDataset
+
+    reactant = Structure(["H", "H"], np.array([[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]]))
+    product = Structure(["H", "H"], np.array([[0.0, 0.0, 0.0], [1.4, 0.0, 0.0]]))
+    state = Structure(["H", "H"], np.array([[0.0, 0.0, 0.0], [1.2, 0.0, 0.0]]))
+    catalog = EventCatalog(events={"0": Event("0", reactant, product, transition_state=state)})
+
+    plain = BridgeFlowDataset(catalog, timesteps=16, seed=1)[0]
+    swapped = BridgeFlowDataset(catalog, timesteps=16, seed=1, swap_reactant_product=True)[0]
+
+    torch.testing.assert_close(swapped.reactant_pos, plain.endpoint_pos)
+    torch.testing.assert_close(swapped.endpoint_pos, plain.reactant_pos)
+    torch.testing.assert_close(swapped.source_pos, plain.source_pos)
+    torch.testing.assert_close(swapped.target_pos, plain.target_pos)

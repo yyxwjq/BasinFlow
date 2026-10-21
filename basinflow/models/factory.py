@@ -1,4 +1,4 @@
-"""Construct flow backends and restore explicit or legacy checkpoints."""
+"""Construct flow backends and restore saved checkpoints."""
 from __future__ import annotations
 
 from collections.abc import Mapping
@@ -33,8 +33,6 @@ def model_spec(config: Mapping, *, default_backend: str = "painn") -> tuple[str,
             "endpoint_equivariant": _flag(config.get("endpoint_equivariant", False)),
             # Time-channel controls: ``time_scale`` widens the Fourier basis and
             # ``time_per_layer`` re-injects the clock into every message block.
-            # Both default to the previous behaviour, so existing checkpoints
-            # keep their exact parameter set.
             "time_scale": float(config.get("time_scale", 1.0)),
             "time_per_layer": _flag(config.get("time_per_layer", False)),
         }
@@ -49,8 +47,8 @@ def model_spec(config: Mapping, *, default_backend: str = "painn") -> tuple[str,
                 parameters[name] = int(config[name])
     elif backend in {"leftnet", "leftnet_sb"}:
         # ReactOT's LEFTNet defaults (train_rpsb_ts1x.py:38-51). ``leftnet`` and
-        # ``leftnet_sb`` build the same module; the second name records that the
-        # run uses the Schrodinger-bridge objective.
+        # ``leftnet_sb`` build the same module; the second name selects the
+        # Schrodinger-bridge objective.
         parameters = {
             "hidden_channels": int(config.get("num_features", config.get("hidden_channels", 196))),
             "num_layers": int(config.get("num_layers", 6)),

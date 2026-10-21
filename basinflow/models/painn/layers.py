@@ -91,9 +91,7 @@ def _bound_vector(vector: torch.Tensor, cap: float) -> torch.Tensor:
     """Soft per-node cap on the vector stream.
 
     The rescaling factor is a per-node scalar derived from that node's vector
-    norms, so it commutes with rotations and reflections and therefore preserves
-    E(3) equivariance. A constant divisor cannot bound a stream whose magnitude
-    grows across layers; this can.
+    norms, so it commutes with rotations and reflections.
     """
     rms = torch.sqrt(vector.square().sum(dim=1).mean(dim=1, keepdim=True) + 1e-12)
     return vector * (cap / (cap + rms))[:, :, None]
@@ -109,17 +107,14 @@ class DualMessageBlock(nn.Module):
         self.scaled = stability_mode in {"scaled", "bounded"}
         self.bounded = stability_mode == "bounded"
         # An extra conditioning geometry (the product endpoint of an R+P -> TS
-        # task). ``endpoint_equivariant`` decides whether it contributes edge
-        # unit vectors to the vector message or only distances to the scalar
-        # filter; the two settings are the ablation the user asked for.
+        # task). ``endpoint_equivariant`` decides whether it contributes edge unit
+        # vectors to the vector message or only distances to the scalar filter.
         if endpoint_equivariant and not endpoint_condition:
             raise ValueError("endpoint_equivariant requires endpoint_condition")
         self.endpoint_condition = bool(endpoint_condition)
         self.endpoint_equivariant = bool(endpoint_equivariant)
-        # The bond-change condition is a discrete reactant-side label, so it
-        # enters the reference filter as extra one-hot channels rather than
-        # through the geometry. Off by default: enabling it changes the filter
-        # shape, hence the checkpoint shape.
+        # The bond-change condition enters the reference filter as extra one-hot
+        # channels, which changes the filter shape. Off by default.
         self.bond_change_condition = bool(bond_change_condition)
         filter_dim = num_radial_basis + (BOND_CHANGE_CLASSES if self.bond_change_condition else 0)
         self.vector_scale = math.sqrt(features)
@@ -138,11 +133,7 @@ class DualMessageBlock(nn.Module):
             nn.Linear(num_radial_basis, features)
             if (self.endpoint_condition and self.endpoint_equivariant) else None
         )
-        # Optional per-layer time gate. The flow field's time dependence must
-        # survive every message-passing layer; routing it only through the input
-        # scalar features lets it wash out, and the fitted field then comes out
-        # nearly constant in t (docs/27). ``time_features=0`` keeps the previous
-        # parameter set exactly, so existing checkpoints load unchanged.
+        # Optional per-layer time gate; ``time_features=0`` leaves it unbuilt.
         self.time_gate = (
             nn.Linear(time_features, features * 4) if time_features else None
         )

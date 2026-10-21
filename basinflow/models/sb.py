@@ -1,21 +1,17 @@
 """The Schrödinger-bridge schedule and bridge algebra used by ReactOT.
 
-Provenance: ``reactot/diffusion/_schedule.py`` (``make_beta_schedule``,
+Follows ``reactot/diffusion/_schedule.py`` (``make_beta_schedule``,
 ``compute_gaussian_product_coef``, ``SBSchedule``), ``reactot/diffusion/_utils.py``
 (``unsqueeze_xdim``, ``space_indices``) and ``reactot/diffusion/en_sb.py``
 (``q_sample`` / ``compute_label`` / ``compute_pred_x0`` / ``p_posterior`` /
-``ode_sampling.f``).
-
-Only the mathematics is ported; the Lightning module, the ``EnSB`` wrapper and
-the multi-fragment tensor bookkeeping stay in the reference repo. BasinFlow's
-bridge therefore shares the *equations* with ReactOT, not its class hierarchy.
+``ode_sampling.f``). This module carries the equations; the Lightning module, the
+``EnSB`` wrapper and the multi-fragment tensor bookkeeping stay in the reference
+repo.
 
 Reference defaults (``reactot/trainer/train_rpsb_ts1x.py:128-141``):
 ``timesteps=3000``, ``beta_max=0.3``, ``power=0.5``, ``inv_power=1``,
 ``sigma=0``, ``ot_ode=True``. With ``linear_start == linear_end ==
-beta_max/timesteps`` the reference beta schedule is *constant*, which is what
-makes ``ode_sampling``'s ``betas[:-1] == betas[1:]`` assertion hold; that case is
-covered by a test here.
+beta_max/timesteps`` the reference beta schedule is constant.
 
 Conventions (they differ between the two libraries and must not be mixed):
 

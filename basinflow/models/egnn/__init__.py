@@ -1,4 +1,4 @@
-"""The EGNN backbone, kept as the legacy Stage 3 compatibility path.
+"""The EGNN backbone.
 
 Layout mirrors :mod:`basinflow.models.painn`: ``layers`` holds the equivariant
 message-passing layer and ``egnn`` the assembled module.

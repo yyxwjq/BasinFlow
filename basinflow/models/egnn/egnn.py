@@ -1,7 +1,7 @@
-"""The assembled EGNN backbone (legacy Stage 3 compatibility path).
+"""The assembled EGNN backbone.
 
 The equivariant layer lives in :mod:`basinflow.models.egnn.layers`; this module
-only assembles embeddings, layers and output heads, mirroring how
+assembles embeddings, layers and output heads, mirroring how
 :mod:`basinflow.models.painn.painn` relates to its own ``layers`` module.
 """
 from __future__ import annotations

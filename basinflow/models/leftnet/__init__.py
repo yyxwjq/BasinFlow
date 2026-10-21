@@ -1,9 +1,9 @@
-"""Ported object-aware LEFTNet backbone (ReactOT reference architecture).
+"""Object-aware LEFTNet backbone (ReactOT reference architecture).
 
 Public surface:
     * :class:`LEFTNet` -- the tensor-in/tensor-out backbone.
-    * ``layers`` -- the building blocks, kept name-compatible with
-      ``reactot/model/leftnet.py`` for auditing.
+    * ``layers`` -- the building blocks, name-compatible with
+      ``reactot/model/leftnet.py``.
 
 The ``EventData`` adapter lives in :mod:`basinflow.models.leftnet.adapter`.
 """

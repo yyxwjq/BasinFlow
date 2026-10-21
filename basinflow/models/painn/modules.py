@@ -14,8 +14,7 @@ def _field(data, name, default=None):
 def prepare_flow_input(data, cutoff, time=None):
     """Adapt EventData to the tensor API, rebuilding both geometric neighborhoods.
 
-    Positions use a shared unwrapped lift relative to the reactant. Applying a
-    common lattice shift to either atom's two states preserves the prediction.
+    Positions use a shared unwrapped lift relative to the reactant.
     """
     current = _field(data, "pos")
     reference = _field(data, "reactant_pos")
@@ -26,8 +25,7 @@ def prepare_flow_input(data, cutoff, time=None):
         graph_ids = torch.zeros(len(current), dtype=torch.long, device=current.device)
     cells = _field(data, "cell").reshape(-1, 3, 3).to(current)
     periodic = _field(data, "pbc").reshape(-1, 3).bool()
-    # One call builds the union graph topology plus both states' edge vectors, so
-    # the backbone receives edge geometry instead of reconstructing it.
+    # One call builds the union graph topology plus both states' edge vectors.
     graph = torch_neighbor_graph_from_batch(
         {"pos": current, "batch": graph_ids, "cell": cells, "pbc": periodic},
         cutoff=cutoff,

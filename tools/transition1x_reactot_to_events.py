@@ -8,7 +8,7 @@ downloaded files: the two ``use_ind`` sets are disjoint and their union is every
 row, and the coordinates agree row by row.
 
 Output: one flat directory of ``event_<ordinal>.traj`` files plus ``split.csv``,
-which is the only layout the rewritten data layer reads
+which is the layout the data layer reads
 (``basinflow/data/events.load_events`` + ``splits.load_split``).
 
 Conversion rules, all forced by the reference implementation
@@ -20,9 +20,8 @@ Conversion rules, all forced by the reference implementation
   on-disk order must not follow the reference's.
 * **Per-frame centroid centering, no alignment.** ReactOT's dataset centers each
   frame at its own centroid (``base_dataset.process_molecules``, ``center=True``)
-  and never Kabsch-aligns product to reactant. ``--align-product-to-reactant``
-  deliberately does **not** exist here: it would change the bridge prior
-  ``(R + P) / 2`` and break comparability with the reference.
+  and never Kabsch-aligns product to reactant, so the bridge prior ``(R + P) / 2``
+  is the reference's. There is no ``--align-product-to-reactant`` option.
 * **``movable_mask`` is all True.** ReactOT's ``fixed_idx = [0, 2]`` clamps the R
   and P *fragments* inside the model; it is not a data-side constraint. Writing it
   into ``movable_mask`` would make the loss and the sampler treat every atom as
@@ -170,7 +169,6 @@ def convert(
     *,
     center: bool = True,
     single_fragment_only: bool = False,
-    write_basin_table: bool = False,
 ) -> dict[str, Any]:
     """Write the ReactOT bridge dataset and return a provenance report."""
     train_path, valid_path = Path(train_pickle), Path(valid_pickle)
@@ -237,16 +235,6 @@ def convert(
     }
     _write_split(events_dir / "split.csv", split)
 
-    if write_basin_table:
-        reactions = train_raw["reactant"].get("rxn")
-        if reactions is None:
-            raise ValueError("cannot write a group table: the source has no reactant.rxn field")
-        with (events_dir / "basin_table.csv").open("w", newline="", encoding="utf-8") as handle:
-            writer = csv.writer(handle)
-            writer.writerow(["event_id", "basin"])
-            for entry in rows_report:
-                writer.writerow([entry["event_id"], str(reactions[int(entry["source_index"])])])
-
     return {
         "events_dir": str(events_dir),
         "num_events": len(rows_report),
@@ -269,7 +257,6 @@ def main() -> None:
         help="keep the source coordinates; the reference always centers per frame, so this is a diagnostic arm",
     )
     parser.add_argument("--single-fragment-only", action="store_true")
-    parser.add_argument("--basin-table", action="store_true", help="also write basin_table.csv (event_id,basin)")
     args = parser.parse_args()
     report = convert(
         args.train_pickle,
@@ -277,7 +264,6 @@ def main() -> None:
         args.output_events_dir,
         center=not args.no_center,
         single_fragment_only=args.single_fragment_only,
-        write_basin_table=args.basin_table,
     )
     print(
         f"wrote {report['num_events']} events to {report['events_dir']} "

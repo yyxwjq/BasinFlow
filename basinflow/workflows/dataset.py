@@ -1,30 +1,25 @@
 """Resolve a workflow's data source: one event directory plus its ``split.csv``.
 
-There is exactly one mode. ``[data] events_dir`` names the directory of
-``event_<id>.traj``/``event_<id>.extxyz`` files, and each file is one event.
-``[data] auto_split`` decides where the train/val/test assignment comes from:
+``[data] events_dir`` names the directory of event files, and each file is one
+event. ``[data] auto_split`` decides where the train/val/test assignment comes
+from:
 
 * ``true`` -- split the events by the ``[split]`` fractions and ``seed``, writing
-  ``split.csv`` into the events directory. An existing file is reused, so a rerun
-  never silently changes which events are held out; set
-  ``[data] regenerate_split = true`` to resplit and overwrite it.
+  ``split.csv`` into the events directory. An existing file is reused unless
+  ``[data] regenerate_split = true``.
 * ``false`` -- read the existing ``split.csv``; when there is none, every event is
-  used for training instead of inventing a split.
+  used for training.
 """
 from __future__ import annotations
 
 from pathlib import Path
 
 from basinflow.data import load_events, resolve_split
-from basinflow.workflows.config import parse_bool, parse_pbc_override
+from basinflow.workflows.config import parse_bool
 
 
-def load_configured_dataset(config, *, seed: int, groups: dict[str, str] | None = None):
-    """Return ``(catalog, split, provenance)`` for a parsed workflow config.
-
-    ``groups`` maps event id to a grouping key and is passed through to the
-    automatic split, so that all events of one group land in one partition.
-    """
+def load_configured_dataset(config, *, seed: int):
+    """Return ``(catalog, split, provenance)`` for a parsed workflow config."""
     data = config["data"]
     split_config = config["split"] if config.has_section("split") else {}
 
@@ -33,7 +28,7 @@ def load_configured_dataset(config, *, seed: int, groups: dict[str, str] | None 
 
     split_seed = int(split_config.get("seed", seed))
     events_dir = Path(data["events_dir"].strip())
-    catalog = load_events(events_dir, pbc_override=parse_pbc_override(data.get("pbc_override")))
+    catalog = load_events(events_dir)
     split, provenance = resolve_split(
         events_dir,
         catalog,
@@ -42,7 +37,6 @@ def load_configured_dataset(config, *, seed: int, groups: dict[str, str] | None 
         val=fraction("val", 0.15),
         test=fraction("test", 0.15),
         seed=split_seed,
-        groups=groups,
         regenerate=parse_bool(data.get("regenerate_split", "false")),
     )
     provenance.setdefault("split_seed", split_seed)

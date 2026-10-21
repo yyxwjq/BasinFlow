@@ -37,7 +37,7 @@ def _matplotlib():
     return plt
 
 
-# Reference value for this task, from docs/23 section 五 (val, full split).
+# Reference value for this task (full val split).
 MIDPOINT_BRIDGE = 0.4870
 
 

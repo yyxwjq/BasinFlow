@@ -1,16 +1,14 @@
 """Batched tensor neighbor graphs, one API for every backbone.
 
-Models differ in *which* geometry they build from, not in how a graph is built:
+:func:`torch_neighbor_graph_from_batch` returns the same five keys for every
+backbone:
 
-* EGNN integrates on one geometry, so it asks for the graph of ``pos``.
-* PaiNN keeps the unperturbed reactant next to the current state and needs a
-  *topology-stable* graph over both, so it passes ``reference_positions`` and gets
-  the union of the two radius graphs, with per-state edge vectors.
+* EGNN integrates on one geometry and asks for the radius graph of ``pos``.
+* PaiNN passes ``reference_positions`` and gets the union of the radius graphs over
+  the reference and the current state, with per-state edge vectors.
 
-Both go through :func:`torch_neighbor_graph_from_batch`, which returns the same
-five keys either way, so a backbone never has to reconstruct geometry itself.
-The builder is pure torch (:mod:`basinflow.geometry.radius_graph`), so calling it
-on every integration step is cheap and differentiable with respect to positions.
+The builder is pure torch (:mod:`basinflow.geometry.radius_graph`) and
+differentiable with respect to positions.
 """
 from __future__ import annotations
 

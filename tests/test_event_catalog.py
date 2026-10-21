@@ -31,8 +31,7 @@ def test_event_target_is_the_mic_displacement_and_the_lifted_endpoint():
 
     assert np.allclose(target.displacement, [[0.3, 0.0, 0.0], [0.0, 0.0, 0.0]])
     assert np.allclose(target.target_positions, target.reactant.positions + target.displacement)
-    # Derived active-atom and direction labels no longer exist: both are functions
-    # of the displacement, so a stored copy is a second thing to keep in sync.
+    # A target carries no stored active-atom or direction labels.
     assert not hasattr(target, "active_mask")
     assert not hasattr(target, "direction")
 
@@ -92,7 +91,11 @@ def test_ordered_event_ids_are_numeric_not_lexicographic(tmp_path):
     for index in (2, 10, 1):
         ase.io.write(
             tmp_path / f"event_{index}.traj",
-            [Atoms("H", positions=[[0.0, 0.0, 0.0]]), Atoms("H", positions=[[0.4, 0.0, 0.0]])],
+            [
+                Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+                Atoms("H", positions=[[0.4, 0.0, 0.0]]),
+                Atoms("H", positions=[[0.2, 0.0, 0.0]]),
+            ],
         )
     catalog = load_events(tmp_path)
 
@@ -106,7 +109,7 @@ def test_load_events_keeps_the_movement_constraint_separate_from_supervision(tmp
     from ase.constraints import FixAtoms
 
     frames = []
-    for shift in (0.0, 0.3):
+    for shift in (0.0, 0.3, 0.15):
         frame = Atoms("H2", positions=[[0, 0, 0], [1.0 + shift, 0, 0]], cell=np.eye(3) * 10, pbc=False)
         # Fixed atoms live in the ASE constraint, which .traj carries and extxyz
         # does not; the data layer reads it and nothing else.
@@ -123,45 +126,23 @@ def test_load_events_keeps_the_movement_constraint_separate_from_supervision(tmp
     assert np.allclose(target.displacement[1], [0.3, 0.0, 0.0])
 
 
-def test_load_events_rejects_a_file_name_without_an_integer_event_id(tmp_path):
-    ase.io.write(
-        tmp_path / "reactant_0.traj",
-        [Atoms("H", positions=[[0.0, 0.0, 0.0]]), Atoms("H", positions=[[0.4, 0.0, 0.0]])],
-    )
-
-    with pytest.raises(ValueError, match="integer event id"):
-        load_events(tmp_path, glob_patterns=("reactant_*.traj",))
-
-
-def test_load_events_rejects_event_files_with_more_than_three_frames(tmp_path):
-    frames = [Atoms("H", positions=[[value, 0.0, 0.0]]) for value in range(4)]
-    ase.io.write(tmp_path / "event_0.traj", frames)
-
-    with pytest.raises(ValueError, match="two or three frames"):
-        load_events(tmp_path)
-
-
-def test_load_events_accepts_eon_saddle_as_the_transition_state_role(tmp_path):
-    """EON names its third frame 'saddle'; the data layer calls it transition_state."""
-    frames = []
-    for role in ("reactant", "product", "saddle"):
-        frame = Atoms("H", positions=[[0.0, 0.0, 0.0]])
-        frame.info["role"] = role
-        frames.append(frame)
+def test_load_events_ignores_files_that_are_not_event_files(tmp_path):
+    frames = [
+        Atoms("H", positions=[[0.0, 0.0, 0.0]]),
+        Atoms("H", positions=[[0.4, 0.0, 0.0]]),
+        Atoms("H", positions=[[0.2, 0.0, 0.0]]),
+    ]
+    ase.io.write(tmp_path / "reactant_0.traj", frames)
     ase.io.write(tmp_path / "event_0.traj", frames)
 
     catalog = load_events(tmp_path)
 
-    assert catalog.events["0"].transition_state is not None
+    assert catalog.event_ids == ["0"]
 
 
-def test_load_events_rejects_a_frame_whose_declared_role_is_wrong(tmp_path):
-    frames = []
-    for role in ("reactant", "transition_state", "product"):
-        frame = Atoms("H", positions=[[0.0, 0.0, 0.0]])
-        frame.info["role"] = role
-        frames.append(frame)
+def test_load_events_rejects_event_files_with_other_than_three_frames(tmp_path):
+    frames = [Atoms("H", positions=[[value, 0.0, 0.0]]) for value in range(4)]
     ase.io.write(tmp_path / "event_0.traj", frames)
 
-    with pytest.raises(ValueError, match="declares role 'transition_state'"):
+    with pytest.raises(ValueError, match="exactly three frames"):
         load_events(tmp_path)

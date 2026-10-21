@@ -1,26 +1,18 @@
 """ReactOT reference-protocol RMSD, reported next to BasinFlow's strict one.
 
-ReactOT scores a generated transition state against the reference with
-pymatgen's ``KabschMatcher`` (``same_order=True``), keeps the lower of the two
-fits after reflecting one structure (``ignore_chirality=True``), and caps the
-value at ``1.0`` A. That is ``batch_rmsd_sb`` ->
-``reactot/analyze/rmsd.py:105-129``; ``reactot-pretrained``'s ``eval_rmsd``
-reaches it through ``eval_sample_batch``.
+ReactOT scores a generated transition state against the reference with pymatgen's
+``KabschMatcher`` (``same_order=True``), keeps the lower of the two fits after
+reflecting one structure (``ignore_chirality=True``), and caps the value at ``1.0``
+A (``reactot/analyze/rmsd.py:105-129``).
 
-BasinFlow's existing ``aligned_rmsd_angstrom`` is a *proper-rotation* fit and
-must not be redefined: ``docs/17_reference_protocol_audit.md`` requires the
-strict and reference conventions to be reported side by side, because the
-reference numbers (``min(rmsd, 1)`` plus mirror) are systematically lower and a
-capped value carries no information once an error exceeds the cap.
+``aligned_rmsd_angstrom`` stays a proper-rotation fit; this module adds the
+reference convention as a second, separately labelled protocol. It reuses
+:func:`kabsch_aligned_rmsd` below, whose
+``mirror_allowed`` branch is the reference reflection rule.
 
-This module therefore adds a second, clearly labelled protocol instead of
-changing the first. It reuses :func:`basinflow.evaluation.basin_recall.kabsch_aligned_rmsd`,
-whose ``mirror_allowed`` branch is already the reference reflection rule, so
-there is exactly one Kabsch implementation in the package.
-
-Permutation search (``same_order=False`` in pymatgen) is intentionally not
-implemented: the reference TS metric runs with ``same_order=True``
-(``pl_trainer.py:1033``), so the atoms keep their file order here too.
+Permutation search (``same_order=False`` in pymatgen) is not implemented: the
+reference TS metric runs with ``same_order=True`` (``pl_trainer.py:1033``), so the
+atoms keep their file order.
 """
 from __future__ import annotations
 
@@ -29,7 +21,45 @@ from typing import Any
 import numpy as np
 
 from basinflow.data import Structure
-from basinflow.evaluation.basin_recall import kabsch_aligned_rmsd
+
+def kabsch_aligned_rmsd(
+    a: Structure,
+    b: Structure,
+    reference: Structure,
+    *,
+    mirror_allowed: bool = False,
+) -> float:
+    """Movable-atom RMSD after optimal rigid alignment.
+
+    ``mirror_allowed=False`` is a proper-rotation fit (``det = +1``);
+    ``mirror_allowed=True`` also fits the reflected structure and keeps the lower
+    value, which is ReactOT's ``ignore_chirality=True``.
+    """
+    if a.n_atoms != b.n_atoms or a.n_atoms != reference.n_atoms:
+        raise ValueError("structures must have the same atom count")
+    movable = np.asarray(reference.movable_mask, dtype=bool)
+    if not movable.any():
+        movable = np.ones((reference.n_atoms,), dtype=bool)
+    first = np.asarray(a.positions, dtype=float)[movable]
+    second = np.asarray(b.positions, dtype=float)[movable]
+    first = first - first.mean(axis=0)
+    second = second - second.mean(axis=0)
+    mirrored = second.copy()
+    mirrored[:, -1] = -mirrored[:, -1]
+    u, _, vt = np.linalg.svd(first.T @ second)
+    correction = np.eye(3)
+    correction[-1, -1] = np.sign(np.linalg.det(vt.T @ u.T))
+    rotation = vt.T @ correction @ u.T
+    rmsd = float(np.sqrt(np.mean(np.sum((first @ rotation.T - second) ** 2, axis=1))))
+    if not mirror_allowed:
+        return rmsd
+    u, _, vt = np.linalg.svd(first.T @ mirrored)
+    correction = np.eye(3)
+    correction[-1, -1] = np.sign(np.linalg.det(vt.T @ u.T))
+    rotation = vt.T @ correction @ u.T
+    reflected = float(np.sqrt(np.mean(np.sum((first @ rotation.T - mirrored) ** 2, axis=1))))
+    return min(rmsd, reflected)
+
 
 #: Protocol label for the reference (mirror + cap) convention.
 REACTOT_REFERENCE_PROTOCOL = "reactot_reference_protocol"
@@ -66,7 +96,7 @@ def dual_protocol_rmsd(
     *,
     cap: float = REACTOT_RMSD_CAP,
 ) -> dict[str, float]:
-    """Both conventions at once, so a report never has to choose between them.
+    """Both conventions at once.
 
     Keys:
 
@@ -95,8 +125,7 @@ def dual_protocol_rmsd(
 def summarize_rmsds(values: list[float]) -> dict[str, Any]:
     """Mean/median/min/max for a column, with an explicit ``None`` for empties.
 
-    Mirrors ``basinflow.evaluation.transition_state._summary`` so a dual-protocol
-    block has the same shape as the existing summary entries.
+    Keys match ``basinflow.evaluation.transition_state._summary``.
     """
     if not values:
         return {"count": 0, "mean": None, "median": None, "min": None, "max": None}

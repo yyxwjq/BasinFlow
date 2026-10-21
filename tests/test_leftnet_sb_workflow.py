@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import configparser
 import json
+import math
 import subprocess
 import sys
 from pathlib import Path
@@ -19,21 +20,12 @@ import pytest
 torch = pytest.importorskip("torch")
 pytest.importorskip("torch_geometric")
 
-from test_transition1x import _write_transition1x_fixture  # noqa: E402
+from _fixtures import write_reactot_events  # noqa: E402
 
 
 @pytest.fixture()
 def events_dir(tmp_path: Path) -> Path:
-    source = tmp_path / "train.pkl"
-    output_dir = tmp_path / "events"
-    _write_transition1x_fixture(source)
-    result = subprocess.run(
-        [sys.executable, "tools/transition1x_to_events.py", str(source), str(output_dir),
-         "--selection", "use_ind", "--center"],
-        check=False, capture_output=True, text=True,
-    )
-    assert result.returncode == 0, result.stderr + result.stdout
-    return output_dir
+    return write_reactot_events(tmp_path)
 
 
 def _config(tmp_path: Path, events_dir: Path, *, output_name: str = "bridge_run",
@@ -57,7 +49,7 @@ def _config(tmp_path: Path, events_dir: Path, *, output_name: str = "bridge_run"
     parser["loss"] = {"velocity_weight": "1.0", "norm": "mse"}
     parser["runtime"] = {"device": "cpu", "cpu_threads": "1"}
     parser["evaluation"] = {"eval_num_steps": "4", "trials_per_event": "1", "sampling_seed": "5",
-                            "split": "val", "integrator": "euler", "solver_atol": "0.01",
+                            "split": "test", "integrator": "euler", "solver_atol": "0.01",
                             "solver_rtol": "0.01"}
     path = tmp_path / f"{output_name}.ini"
     with path.open("w", encoding="utf-8") as file:
@@ -100,12 +92,31 @@ def test_bridge_workflow_writes_both_checkpoints_and_the_dual_protocol(tmp_path,
     assert saved["model_backend"] == "leftnet_sb"
     assert saved["evaluated_weights"] == "ema"
 
+    # The bridge arm defaults to the reference training contract, without needing
+    # either key in the config.
+    state = torch.load(run_dir / "training_state.pt", map_location="cpu", weights_only=False)
+    assert state["config"]["batch_sampler"] == "node2"
+    assert state["config"]["max_num"] == 2800
+    assert state["config"]["adaptive_clip"] is True
+    # The sampler must actually produce a batch for this two-event fixture; a
+    # drop-everything epoch would still write checkpoints and pass weaker checks.
+    assert state["config"]["completed_steps"] >= 1
 
-def test_bridge_workflow_rejects_velocity_style_epoch_validation(tmp_path, events_dir):
+
+def test_bridge_workflow_validates_each_epoch_and_keeps_the_best(tmp_path, events_dir):
+    """The reference selects on val_ep_scaled_err; the best weights are scored."""
     from basinflow.workflows.transition_state import run_transition1x_ts
 
-    with pytest.raises(ValueError, match="validate_each_epoch"):
-        run_transition1x_ts(_config(tmp_path, events_dir, validate_each_epoch=True))
+    report = run_transition1x_ts(
+        _config(tmp_path, events_dir, output_name="validated", validate_each_epoch=True)
+    )
+    run_dir = tmp_path / "validated"
+    assert (run_dir / "best.pt").is_file()
+    assert report["validation"]["best_epoch"] == 1
+    assert math.isfinite(report["validation"]["val_scaled_err"])
+    state = torch.load(run_dir / "training_state.pt", map_location="cpu", weights_only=False)
+    assert state["config"]["bridge_validation"] is True
+    assert state["config"]["best_epoch"] == 1
 
 
 def test_bridge_workflow_can_run_without_ema(tmp_path, events_dir):
@@ -114,3 +125,23 @@ def test_bridge_workflow_can_run_without_ema(tmp_path, events_dir):
     report = run_transition1x_ts(_config(tmp_path, events_dir, output_name="no_ema", ema_decay=None))
     assert report["evaluated_weights"] == "raw"
     assert report["ema_decay"] is None
+
+
+def test_bridge_workflow_resumes_from_the_latest_complete_checkpoint(tmp_path, events_dir):
+    """An HPC job killed by wall time must continue, not restart."""
+    from basinflow.workflows.transition_state import run_transition1x_ts
+
+    config = _config(tmp_path, events_dir, output_name="resume_run")
+    text = config.read_text(encoding="utf-8")
+    text = text.replace("epochs = 1", "epochs = 2").replace("max_steps = 2", "max_steps = 1")
+    text = text.replace("[training]", "[training]\nresume_from = auto")
+    config.write_text(text, encoding="utf-8")
+
+    run_transition1x_ts(config)  # first job: one optimizer step
+
+    text = config.read_text(encoding="utf-8").replace("max_steps = 1", "max_steps = 2")
+    config.write_text(text, encoding="utf-8")
+    run_transition1x_ts(config)  # resubmission: continues from step 1
+
+    state = torch.load(tmp_path / "resume_run" / "training_state.pt", map_location="cpu", weights_only=False)
+    assert state["config"]["completed_steps"] == 2

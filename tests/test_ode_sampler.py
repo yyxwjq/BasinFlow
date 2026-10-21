@@ -25,7 +25,8 @@ def test_defaults_match_molgen():
     assert DEFAULT_METHOD == "dopri5"
     assert DEFAULT_ATOL == 1e-6
     assert DEFAULT_RTOL == 1e-3
-    assert set(METHODS) == {"dopri5", "euler"}
+    # ``midpoint`` is ReactOT's fixed-step evaluation solver (nfe = saved points - 1).
+    assert set(METHODS) == {"dopri5", "euler", "midpoint"}
 
 
 def test_it_solves_a_constant_field_exactly():

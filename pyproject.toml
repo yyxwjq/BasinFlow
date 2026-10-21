@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "basinflow"
 version = "0.1.0"
-description = "Geometry and data core for BasinFlow event proposal workflows"
+description = "ReactOT reproduction: R+P -> TS with a LEFTNet Schrodinger bridge"
 requires-python = ">=3.10"
 dependencies = [
   "ase",
