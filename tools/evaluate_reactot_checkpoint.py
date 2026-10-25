@@ -33,6 +33,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True, help="new output directory")
     parser.add_argument("--split", default="test", choices=("train", "val", "test"))
     parser.add_argument("--num-events", type=int, default=None)
+    parser.add_argument("--stride", type=int, default=1, help="evaluate every Nth event (for a representative subset)")
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--steps", type=int, default=11, help="saved ODE points (reference nfe + 1)")
     parser.add_argument("--device", default="cpu")
@@ -43,6 +44,8 @@ def main() -> int:
     catalog = load_events(args.events)
     split = load_split(args.events / "split.csv", catalog)
     identifiers = partition(split, args.split)
+    if int(args.stride) > 1:
+        identifiers = identifiers[:: int(args.stride)]
     if not identifiers:
         raise SystemExit(f"split {args.split!r} is empty")
     test_catalog = catalog.select(identifiers, name=args.split)

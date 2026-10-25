@@ -47,6 +47,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--split", default=None)
     parser.add_argument("--num-events", type=int, default=None)
+    parser.add_argument("--stride", type=int, default=1, help="evaluate every Nth event (for a representative subset)")
     parser.add_argument("--steps", type=int, default=None)
     parser.add_argument("--trials", type=int, default=None)
     parser.add_argument("--integrator", default=None)
