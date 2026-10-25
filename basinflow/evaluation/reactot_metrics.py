@@ -36,12 +36,19 @@ def _movable(first: Structure, second: Structure, reference: Structure) -> tuple
 
 
 def _fit(first: np.ndarray, second: np.ndarray) -> float:
-    """Proper-rotation Kabsch RMSD of two centred coordinate sets."""
+    """Proper-rotation Kabsch RMSD of two centred coordinate sets.
+
+    ReactOT reports the per-coordinate RMSD: the sum of squared displacements is
+    averaged over ``3 * n_atoms`` coordinates, not over atoms.  pymatgen's
+    ``KabschMatcher.fit`` used by ``reactot/analyze/rmsd.py`` returns this value;
+    omitting the factor 3 makes every reported RMSD ``sqrt(3)`` too large.
+    """
     u, _, vt = np.linalg.svd(first.T @ second)
     correction = np.eye(3)
     correction[-1, -1] = np.sign(np.linalg.det(vt.T @ u.T))
     rotation = vt.T @ correction @ u.T
-    return float(np.sqrt(np.mean(np.sum((first @ rotation.T - second) ** 2, axis=1))))
+    squared = np.sum((first @ rotation.T - second) ** 2, axis=1)
+    return float(np.sqrt(np.mean(squared) / 3.0))
 
 
 def kabsch_aligned_rmsd(
