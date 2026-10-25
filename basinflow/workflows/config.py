@@ -33,7 +33,7 @@ ALLOWED: dict[str, frozenset[str]] = {
         "save_every_n_epochs",
     }),
     "bridge": frozenset({"timesteps", "beta_max", "power", "inv_power", "t_eps"}),
-    "loss": frozenset({"norm"}),
+    "loss": frozenset({"norm", "velocity_weight"}),
     "runtime": frozenset({"device", "cpu_threads"}),
     "evaluation": frozenset({
         "eval_num_steps", "trials_per_event", "num_events", "sampling_seed",
