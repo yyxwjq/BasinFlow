@@ -80,6 +80,8 @@ def main() -> int:
     split = load_split(events / "split.csv", catalog)
     split_name = args.split or config["evaluation"].get("split", "test").strip().lower()
     identifiers = partition(split, split_name)
+    if int(args.stride) > 1:
+        identifiers = identifiers[:: int(args.stride)]
     if not identifiers:
         raise SystemExit(f"split {split_name!r} is empty")
     evaluation_catalog = catalog.select(identifiers, name=split_name)
