@@ -52,6 +52,7 @@ def main() -> int:
     parser.add_argument("--integrator", default=None)
     parser.add_argument("--weights", choices=("ema", "raw"), default="ema")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--write-xyz", action="store_true", help="write per-event pred/target/reactant/product/midpoint XYZ")
     args = parser.parse_args()
 
     from basinflow.workflows.transition_state import REQUIRED
@@ -104,6 +105,7 @@ def main() -> int:
         solver_rtol=config["evaluation"].getfloat("solver_rtol", fallback=1e-2),
         t_eps=float(bridge.get("t_eps", 1e-5)),
         device=args.device,
+        write_structures=bool(args.write_xyz),
     )
     print(json.dumps({"checkpoint": str(checkpoint_path), "weights": weights}, indent=2))
     print(json.dumps(summary["reactot_reference_protocol"]["rmsd_angstrom"], indent=2))

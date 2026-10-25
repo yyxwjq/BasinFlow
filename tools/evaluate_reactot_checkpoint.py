@@ -36,6 +36,7 @@ def main() -> int:
     parser.add_argument("--trials", type=int, default=1)
     parser.add_argument("--steps", type=int, default=11, help="saved ODE points (reference nfe + 1)")
     parser.add_argument("--device", default="cpu")
+    parser.add_argument("--write-xyz", action="store_true", help="write per-event pred/target/reactant/product/midpoint XYZ")
     parser.add_argument("--reference-src", type=Path, default=None, help="react-ot checkout (to unpickle the class)")
     args = parser.parse_args()
 
@@ -68,6 +69,7 @@ def main() -> int:
         solver_rtol=1e-2,
         t_eps=DEFAULT_T_EPS,
         device=args.device,
+        write_structures=bool(args.write_xyz),
     )
     print(json.dumps(summary["reactot_reference_protocol"]["rmsd_angstrom"], indent=2))
     print(json.dumps(summary["aligned_rmsd_angstrom"], indent=2))
