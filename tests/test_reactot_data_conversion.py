@@ -77,9 +77,9 @@ def test_conversion_writes_the_canonical_layout(tmp_path: Path) -> None:
     ]
     catalog = load_events(events)
     split = load_split(events / "split.csv", catalog)
-    assert split.train_ids == ("0", "1")
-    assert split.val_ids == ()
-    assert split.test_ids == ("2", "3")
+    assert split["train"] == ("0", "1")
+    assert split["val"] == ()
+    assert split["test"] == ("2", "3")
 
 
 def test_conversion_satisfies_the_event_invariants(tmp_path: Path) -> None:
@@ -154,7 +154,7 @@ def test_resolve_split_reads_the_written_file(tmp_path: Path) -> None:
     catalog = load_events(events)
     split, provenance = resolve_split(events, catalog, auto=False)
     assert provenance["split_mode"] == "loaded"
-    assert (len(split.train_ids), len(split.val_ids), len(split.test_ids)) == (2, 0, 2)
+    assert (len(split["train"]), len(split["val"]), len(split["test"])) == (2, 0, 2)
 
 
 def test_single_fragment_filter_shrinks_both_partitions(tmp_path: Path) -> None:

@@ -9,6 +9,7 @@ mean over the first ``limit_val_batches = 20`` validation batches
 from __future__ import annotations
 
 import numpy as np
+import torch
 
 from basinflow.training.batch_sampler import NodeSquareBatchSampler
 
@@ -37,7 +38,7 @@ def evaluate_bridge_scaled_error(
     was_training = model.training
     model.eval()
     values: list[float] = []
-    with __import__("torch").no_grad():
+    with torch.no_grad():
         for index, batch in enumerate(loader):
             if max_batches is not None and index >= int(max_batches):
                 break

@@ -7,7 +7,11 @@ The tensor-in/tensor-out contract is identical to ``reactot/model/leftnet.py``
 ``torch_scatter`` is replaced by :func:`basinflow.models.leftnet.layers.scatter_sum`
 inside ``EquiMessage.aggregate``; ``assert_rot_equiv`` is not ported. The switch
 semantics (``reflect_equiv``, ``object_aware``, ``legacy``, ``update``,
-``single_layer_output``, ``pos_grad``) match the reference.
+``single_layer_output``) match the reference.
+
+This backbone is molecular: the adapter builds a direct distance graph over the
+three fragments, so periodic frames are rejected rather than wrapped. PaiNN and
+EGNN share ``geometry.radius_graph`` and do support PBC.
 
 Numerical deviation: ``EPS_SQ = 1e-12`` is added *inside* each normalisation square
 root, where the reference adds ``EPS`` outside it. The forward value differs by at
@@ -18,7 +22,6 @@ from __future__ import annotations
 
 import math
 from math import pi
-from typing import Optional
 
 import torch
 from torch import Tensor, nn
@@ -87,7 +90,6 @@ class LEFTNet(nn.Module):
 
     def __init__(
         self,
-        pos_require_grad: bool = False,
         cutoff: float = 10.0,
         num_layers: int = 4,
         hidden_channels: int = 128,
@@ -96,27 +98,18 @@ class LEFTNet(nn.Module):
         reflect_equiv: bool = True,
         legacy: bool = True,
         update: bool = True,
-        pos_grad: bool = False,
         single_layer_output: bool = True,
-        for_conf: bool = False,
-        ff: bool = False,
         object_aware: bool = True,
-        **kwargs,
     ) -> None:
         super().__init__()
         self.num_layers = num_layers
         self.hidden_channels = hidden_channels
         self.cutoff = cutoff
-        self.pos_require_grad = pos_require_grad
         self.reflect_equiv = reflect_equiv
         self.legacy = legacy
         self.update = update
-        self.pos_grad = pos_grad
-        self.for_conf = for_conf
-        self.ff = ff
         self.object_aware = object_aware
-        # ``r_max`` mirrors the PaiNN convention so ``models/factory.model_cutoff``
-        # can read a single attribute for every backend.
+        # ``r_max`` mirrors the PaiNN convention for tools that read one attribute.
         self.r_max = cutoff
 
         self.embedding = nn.Linear(in_hidden_channels, hidden_channels)
@@ -149,13 +142,6 @@ class LEFTNet(nn.Module):
                 activation="swish",
                 bias=False,
             )
-        if self.pos_grad:
-            self.dynamic_mlp_modules = nn.Sequential(
-                nn.Linear(hidden_channels, hidden_channels // 2),
-                nn.SiLU(inplace=True),
-                nn.Linear(hidden_channels // 2, 3),
-            )
-
         self.gcl_layers = nn.ModuleList()
         self.message_layers = nn.ModuleList()
         self.update_layers = nn.ModuleList()
@@ -180,12 +166,12 @@ class LEFTNet(nn.Module):
         dist = (pos[i] - pos[j]).pow(2).sum(dim=-1).sqrt()
         coord_diff = pos[i] - pos[j]
         radial = torch.sum((coord_diff) ** 2, 1).unsqueeze(1)
-        coord_cross = torch.cross(pos[i], pos[j])
+        coord_cross = torch.cross(pos[i], pos[j], dim=-1)
         norm = torch.sqrt(radial + EPS_SQ) + EPS
         coord_diff = coord_diff / norm
         cross_norm = torch.sqrt(torch.sum((coord_cross) ** 2, 1).unsqueeze(1) + EPS_SQ) + EPS
         coord_cross = coord_cross / cross_norm
-        coord_vertical = torch.cross(coord_diff, coord_cross)
+        coord_vertical = torch.cross(coord_diff, coord_cross, dim=-1)
         return dist, coord_diff, coord_cross, coord_vertical
 
     @staticmethod
@@ -208,46 +194,32 @@ class LEFTNet(nn.Module):
         h: Tensor,
         pos: Tensor,
         edge_index: Tensor,
-        edge_attr: Optional[Tensor] = None,
-        node_mask: Optional[Tensor] = None,
-        edge_mask: Optional[Tensor] = None,
-        update_coords_mask: Optional[Tensor] = None,
-        subgraph_mask: Optional[Tensor] = None,
-        pbc: bool = False,
-        distance_vectors: Optional[Tensor] = None,
+        subgraph_mask: Tensor | None = None,
     ):
+        """Run the backbone on ``[R | TS | P]`` concatenated coordinates.
+
+        ``subgraph_mask`` is one for edges inside a fragment and zero for
+        cross-fragment edges; the latter only exist so that the per-sample frame
+        can be assembled, and are masked out of the message passing.
+        """
         if not self.object_aware:
             subgraph_mask = None
 
         i, j = edge_index
         z_emb = self.embedding(h)
 
-        if not pbc:
-            dist = (pos[i] - pos[j]).pow(2).sum(dim=-1).sqrt()
-            inner_subgraph_mask = torch.zeros(edge_index.size(1), 1, device=dist.device)
-            inner_subgraph_mask[torch.where(dist < self.cutoff)[0]] = 1
-            all_edge_masks = inner_subgraph_mask
-            if subgraph_mask is not None:
-                all_edge_masks = all_edge_masks * subgraph_mask
-        else:
-            all_edge_masks = subgraph_mask
+        dist = (pos[i] - pos[j]).pow(2).sum(dim=-1).sqrt()
+        inner_subgraph_mask = torch.zeros(edge_index.size(1), 1, device=dist.device)
+        inner_subgraph_mask[torch.where(dist < self.cutoff)[0]] = 1
+        all_edge_masks = inner_subgraph_mask
+        if subgraph_mask is not None:
+            all_edge_masks = all_edge_masks * subgraph_mask
 
         edge_index_w_cutoff = edge_index.T[torch.where(all_edge_masks > 0)[0]].T
         node_mask_w_cutoff = self.assemble_nodemask(edge_index=edge_index_w_cutoff, pos=pos)
 
         pos_frame = remove_mean_batch(pos.clone(), node_mask_w_cutoff.long())
-
-        if not pbc:
-            dist, coord_diff, coord_cross, coord_vertical = self.scalarization(pos_frame, edge_index)
-        else:
-            coord_diff = distance_vectors
-            dist = distance_vectors.norm(dim=-1)
-            coord_diff = coord_diff / (dist.unsqueeze(1) + EPS)
-            coord_cross = torch.cross(pos[i], pos[j])
-            coord_cross = coord_cross / (
-                torch.sqrt(torch.sum((coord_cross) ** 2, 1).unsqueeze(1) + EPS_SQ) + EPS
-            )
-            coord_vertical = torch.cross(coord_diff, coord_cross)
+        dist, coord_diff, coord_cross, coord_vertical = self.scalarization(pos_frame, edge_index)
 
         dist = dist * all_edge_masks.squeeze(-1)
         coord_diff = coord_diff * all_edge_masks
@@ -295,16 +267,15 @@ class LEFTNet(nn.Module):
             b = nn_vector(eff_dist, eff_edge_index, pos_frame)
 
         x1 = (a - b) / (torch.sqrt(torch.sum((a - b) ** 2, 1).unsqueeze(1) + EPS_SQ) + EPS)
-        y1 = torch.cross(a, b)
+        y1 = torch.cross(a, b, dim=-1)
         normy = torch.sqrt(torch.sum(y1**2, 1).unsqueeze(1) + EPS_SQ) + EPS
         y1 = y1 / normy
-        z1 = torch.cross(x1, y1)
+        z1 = torch.cross(x1, y1, dim=-1)
         nodeframe = torch.cat((x1.unsqueeze(-1), y1.unsqueeze(-1), z1.unsqueeze(-1)), dim=-1)
 
         pos_prjt = torch.sum(pos_frame.unsqueeze(-1) * nodeframe, dim=1)
 
         vec = torch.zeros(s.size(0), 3, s.size(1), device=s.device)
-        gradient = torch.zeros(s.size(0), 3, device=s.device)
         for layer in range(self.num_layers):
             if self.legacy or layer == 0:
                 s = s + self.pos_expansion(pos_prjt)
@@ -319,25 +290,7 @@ class LEFTNet(nn.Module):
                 dx, dvec = self.update_layers[layer](s, vec, nodeframe)
                 s = s + dx
                 vec = vec + dvec
-            if self.pos_grad:
-                dynamic_coff = self.dynamic_mlp_modules(s)
-                basis_mix = (
-                    dynamic_coff[:, :1] * x1 + dynamic_coff[:, 1:2] * y1 + dynamic_coff[:, 2:3] * z1
-                )
-                gradient = gradient + basis_mix / self.num_layers
-
-        if self.for_conf:
-            return s
 
         _, dpos = self.out_pos(s, vec)
-        if update_coords_mask is not None:
-            dpos = update_coords_mask * dpos
-        pos = pos + dpos + gradient
-
-        if self.ff:
-            return s, dpos
-
-        h = self.embedding_out(s)
-        if node_mask is not None:
-            h = h * node_mask
-        return h, pos, None
+        pos = pos + dpos
+        return self.embedding_out(s), pos, None

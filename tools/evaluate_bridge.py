@@ -19,7 +19,7 @@ if str(REPO_ROOT) not in sys.path:
 
 import torch
 
-from basinflow.data import load_events, load_split
+from basinflow.data import load_events, load_split, partition
 from basinflow.evaluation.bridge import run_bridge_trials
 from basinflow.models.factory import build_model, model_spec
 from basinflow.models.sb import SBSchedule
@@ -77,7 +77,7 @@ def main() -> int:
     catalog = load_events(events)
     split = load_split(events / "split.csv", catalog)
     split_name = args.split or config["evaluation"].get("split", "test").strip().lower()
-    identifiers = split.partition(split_name)
+    identifiers = partition(split, split_name)
     if not identifiers:
         raise SystemExit(f"split {split_name!r} is empty")
     evaluation_catalog = catalog.select(identifiers, name=split_name)
@@ -94,7 +94,6 @@ def main() -> int:
         model=model,
         catalog=evaluation_catalog,
         output_dir=output,
-        cutoff=float(model.cutoff),
         num_steps=int(args.steps or config["evaluation"].getint("eval_num_steps")),
         schedule=schedule,
         trials_per_event=int(args.trials or config["evaluation"].getint("trials_per_event")),

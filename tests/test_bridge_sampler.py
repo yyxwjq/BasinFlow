@@ -1,7 +1,7 @@
 """The bridge sampler must integrate the reference ODE to the reference metric.
 
 The decisive property is checkable without training: a model whose residual is
-identically zero produces a zero velocity field, so the integrator must return
+identically zero produces a zero bridge field, so the integrator must return
 the initial condition -- the midpoint ``(R + P) / 2`` -- and the reported
 ``aligned_rmsd_angstrom`` must equal the midpoint-versus-TS RMSD. Any sign or
 time-scaling mistake in the reparameterised field changes that number.
@@ -62,7 +62,6 @@ def _run(tmp_path: Path, model, **overrides) -> dict:
         model=model,
         catalog=_catalog(),
         output_dir=tmp_path / "bridge",
-        cutoff=10.0,
         num_steps=4,
         trials_per_event=1,
         sampling_seed=11,
@@ -139,6 +138,5 @@ def test_schedule_is_required(tmp_path: Path) -> None:
             model=_ZeroModel(),
             catalog=_catalog(),
             output_dir=tmp_path / "x",
-            cutoff=10.0,
             num_steps=4,
         )

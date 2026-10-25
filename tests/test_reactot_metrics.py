@@ -13,10 +13,9 @@ from basinflow.data import Structure
 from basinflow.evaluation.reactot_metrics import (
     REACTOT_RMSD_CAP,
     dual_protocol_rmsd,
-    reactot_reference_rmsd,
-    summarize_rmsds,
+    kabsch_aligned_rmsd,
+    summarize,
 )
-from basinflow.evaluation.reactot_metrics import kabsch_aligned_rmsd
 
 # A chiral four-point set: no proper rotation maps it onto its z-mirror, which is
 # what makes the mirror branch observable.
@@ -47,14 +46,14 @@ def _mirror(positions: np.ndarray) -> np.ndarray:
 
 def test_reference_rmsd_is_zero_for_identical_structures() -> None:
     reference = _structure(_CHIRAL)
-    assert reactot_reference_rmsd(reference, reference, reference) == pytest.approx(0.0)
+    assert kabsch_aligned_rmsd(reference, reference, reference, mirror_allowed=True) == pytest.approx(0.0)
 
 
 def test_mirror_branch_sees_an_inverted_structure_as_a_match() -> None:
     target = _structure(_CHIRAL)
     inverted = _structure(_mirror(_CHIRAL))
     strict = kabsch_aligned_rmsd(inverted, target, target)
-    reference = reactot_reference_rmsd(inverted, target, target)
+    reference = kabsch_aligned_rmsd(inverted, target, target, mirror_allowed=True)
     assert strict > 1e-6, "the chiral set must not be reachable by a proper rotation"
     assert reference == pytest.approx(0.0, abs=1e-6)
 
@@ -66,9 +65,9 @@ def test_cap_saturates_a_large_error() -> None:
     far_positions = _CHIRAL.copy()
     far_positions[3] += np.array([0.0, 0.0, 20.0])
     far = _structure(far_positions)
-    assert reactot_reference_rmsd(far, target, target) == pytest.approx(REACTOT_RMSD_CAP)
-    uncapped = reactot_reference_rmsd(far, target, target, cap=None)
-    assert uncapped > REACTOT_RMSD_CAP
+    dual = dual_protocol_rmsd(far, target, target)
+    assert dual["reactot_reference_rmsd_angstrom"] == pytest.approx(REACTOT_RMSD_CAP)
+    assert dual["reactot_reference_uncapped_rmsd_angstrom"] > REACTOT_RMSD_CAP
 
 
 def test_dual_protocol_reports_both_and_a_nonnegative_gain() -> None:
@@ -105,8 +104,8 @@ def test_movable_mask_restricts_the_fit() -> None:
     target = _structure(_CHIRAL)
     moved_fixed_atom = _CHIRAL.copy()
     moved_fixed_atom[3] += np.array([0.0, 0.0, 9.0])
-    assert reactot_reference_rmsd(
-        _structure(moved_fixed_atom), target, _structure(_CHIRAL, movable)
+    assert kabsch_aligned_rmsd(
+        _structure(moved_fixed_atom), target, _structure(_CHIRAL, movable), mirror_allowed=True
     ) == pytest.approx(0.0)
 
 
@@ -114,12 +113,12 @@ def test_atom_count_mismatch_is_rejected() -> None:
     reference = _structure(_CHIRAL)
     shorter = _structure(_CHIRAL[:3])
     with pytest.raises(ValueError):
-        reactot_reference_rmsd(shorter, reference, reference)
+        kabsch_aligned_rmsd(shorter, reference, reference)
 
 
-def test_summarize_rmsds_handles_empty_and_filled_inputs() -> None:
-    assert summarize_rmsds([]) == {"count": 0, "mean": None, "median": None, "min": None, "max": None}
-    summary = summarize_rmsds([1.0, 0.0, 2.0])
+def test_summarize_handles_empty_and_filled_inputs() -> None:
+    assert summarize([]) == {"count": 0, "mean": None, "median": None, "min": None, "max": None}
+    summary = summarize([1.0, 0.0, 2.0])
     assert summary["count"] == 3
     assert summary["mean"] == pytest.approx(1.0)
     assert summary["median"] == pytest.approx(1.0)

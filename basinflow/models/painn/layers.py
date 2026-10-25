@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import math
 
-from basinflow.geometry.bonds import BOND_CHANGE_CLASSES
-
 import torch
 from torch import nn
 
@@ -98,76 +96,49 @@ def _bound_vector(vector: torch.Tensor, cap: float) -> torch.Tensor:
 
 
 class DualMessageBlock(nn.Module):
-    """PaiNN scalar/vector messages using separate filters for both geometries."""
+    """PaiNN scalar/vector messages over the reactant, current and product edges."""
 
     def __init__(self, features: int, num_radial_basis: int, stability_mode: str = "scaled",
-                 bond_change_condition: bool = False, endpoint_condition: bool = False,
-                 endpoint_equivariant: bool = False, time_features: int = 0):
+                 time_features: int = 0):
         super().__init__()
         self.scaled = stability_mode in {"scaled", "bounded"}
         self.bounded = stability_mode == "bounded"
-        # An extra conditioning geometry (the product endpoint of an R+P -> TS
-        # task). ``endpoint_equivariant`` decides whether it contributes edge unit
-        # vectors to the vector message or only distances to the scalar filter.
-        if endpoint_equivariant and not endpoint_condition:
-            raise ValueError("endpoint_equivariant requires endpoint_condition")
-        self.endpoint_condition = bool(endpoint_condition)
-        self.endpoint_equivariant = bool(endpoint_equivariant)
-        # The bond-change condition enters the reference filter as extra one-hot
-        # channels, which changes the filter shape. Off by default.
-        self.bond_change_condition = bool(bond_change_condition)
-        filter_dim = num_radial_basis + (BOND_CHANGE_CLASSES if self.bond_change_condition else 0)
         self.vector_scale = math.sqrt(features)
         self.vector_cap = math.sqrt(features)
         self.scalar_norm = nn.LayerNorm(features, elementwise_affine=False) if self.scaled else nn.Identity()
         self.source = nn.Sequential(nn.Linear(features, features), nn.SiLU(), nn.Linear(features, features * 4))
-        self.reference_filter = nn.Linear(filter_dim, features * 4)
+        self.reference_filter = nn.Linear(num_radial_basis, features * 4)
         self.current_filter = nn.Linear(num_radial_basis, features * 4)
-        # The endpoint always contributes invariantly through the scalar
-        # filter; the optional separate projection feeds its edge directions
-        # into the vector message.
-        self.endpoint_filter = (
-            nn.Linear(num_radial_basis, features * 4) if self.endpoint_condition else None
-        )
-        self.endpoint_vector_filter = (
-            nn.Linear(num_radial_basis, features)
-            if (self.endpoint_condition and self.endpoint_equivariant) else None
-        )
+        self.endpoint_filter = nn.Linear(num_radial_basis, features * 4)
+        self.endpoint_vector_filter = nn.Linear(num_radial_basis, features)
         # Optional per-layer time gate; ``time_features=0`` leaves it unbuilt.
         self.time_gate = (
             nn.Linear(time_features, features * 4) if time_features else None
         )
 
-    def forward(self, scalar, vector, reference_radial, current_radial, reference_cutoff, current_cutoff, reference_unit, current_unit, edge_index, bond_change=None, endpoint=None, time_embedding=None):
+    def forward(self, scalar, vector, reference_radial, current_radial, reference_cutoff,
+                current_cutoff, reference_unit, current_unit, endpoint_radial,
+                endpoint_cutoff, endpoint_unit, edge_index, time_embedding=None):
         receiver, sender = edge_index
-        if self.bond_change_condition:
-            if bond_change is None:
-                raise ValueError("bond_change_condition is enabled but no bond_change was passed")
-            reference_radial = torch.cat([reference_radial, bond_change], dim=-1)
         filters = self.reference_filter(reference_radial) * reference_cutoff[:, None]
         filters = filters + self.current_filter(current_radial) * current_cutoff[:, None]
+        filters = filters + self.endpoint_filter(endpoint_radial) * endpoint_cutoff[:, None]
         if self.time_gate is not None:
             if time_embedding is None:
                 raise ValueError("this backbone was built with a per-layer time gate but none was passed")
             # Gate on the *receiver's* time so every layer can re-read the clock.
             filters = filters + self.time_gate(time_embedding)[receiver]
-        endpoint_radial = endpoint_cutoff = endpoint_unit = None
-        if self.endpoint_condition:
-            if endpoint is None:
-                raise ValueError("endpoint_condition is enabled but no endpoint was passed")
-            endpoint_radial, endpoint_cutoff, endpoint_unit = endpoint
-            filters = filters + self.endpoint_filter(endpoint_radial) * endpoint_cutoff[:, None]
-        scalar_message, vector_gate, reference_gate, current_gate = (self.source(self.scalar_norm(scalar)[sender]) * filters).chunk(4, dim=-1)
+        scalar_message, vector_gate, reference_gate, current_gate = (
+            self.source(self.scalar_norm(scalar)[sender]) * filters
+        ).chunk(4, dim=-1)
         if self.scaled:
             vector_gate = vector_gate / math.sqrt(3)
         vector_message = vector[sender] * vector_gate[:, None, :]
         vector_message = vector_message + reference_unit[:, :, None] * reference_gate[:, None, :] * reference_cutoff[:, None, None]
         vector_message = vector_message + current_unit[:, :, None] * current_gate[:, None, :] * current_cutoff[:, None, None]
-        if self.endpoint_equivariant:
-            # The endpoint edge direction is a first-class equivariant message,
-            # not just a distance in the scalar filter.
-            endpoint_gate = self.endpoint_vector_filter(endpoint_radial)
-            vector_message = vector_message + endpoint_unit[:, :, None] * endpoint_gate[:, None, :] * endpoint_cutoff[:, None, None]
+        # The product endpoint is a first-class equivariant message.
+        endpoint_gate = self.endpoint_vector_filter(endpoint_radial)
+        vector_message = vector_message + endpoint_unit[:, :, None] * endpoint_gate[:, None, :] * endpoint_cutoff[:, None, None]
         if self.scaled:
             vector_message = vector_message / self.vector_scale
         scalar = scalar + torch.zeros_like(scalar).index_add(0, receiver, scalar_message)
@@ -217,7 +188,7 @@ class GatedEquivariantBlock(nn.Module):
     this head historically did not, so it consumed the raw scalar stream. Under
     ``bounded`` the scalar stream is *not* capped (only the vector stream and the
     inner product are), so this head is the one place where an unbounded scalar
-    could still be turned into a huge velocity. Normalization is applied only for
+    could still be turned into a huge displacement. Normalization is applied only for
     ``bounded`` so that ``none`` and ``scaled`` keep their exact behaviour and
     already-published runs stay reproducible.
     """

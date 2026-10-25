@@ -5,16 +5,16 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "basinflow"
 version = "0.1.0"
-description = "ReactOT reproduction: R+P -> TS with a LEFTNet Schrodinger bridge"
+description = "ReactOT reproduction: R+P -> TS with a shared bridge contract"
 requires-python = ">=3.10"
 dependencies = [
   "ase",
+  "matplotlib",
   "numpy",
 ]
 
 [project.optional-dependencies]
 models = [
-  "scipy",
   "torch",
   "torch-geometric",
   # MolGEN's sampler: odeint(method="dopri5"), see basinflow/sampling/ode.py

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from basinflow.models.factory import build_model, model_cutoff, model_spec
+from basinflow.models.factory import build_model, model_spec
 from basinflow.models.leftnet import LEFTNet
 from basinflow.models.leftnet.adapter import LeftNetBridge
 
@@ -142,6 +142,8 @@ def _bridge_batch(*, samples: int = 2, atoms: int = 4, seed: int = 0) -> SimpleN
         batch=index,
         movable_mask=torch.ones(samples * atoms, dtype=torch.bool),
         flow_time=torch.full((samples, 1), 0.5),
+        cell=torch.eye(3).expand(samples, 3, 3),
+        pbc=torch.zeros(samples, 3, dtype=torch.bool),
         num_graphs=samples,
     )
 
@@ -209,20 +211,19 @@ def test_adapter_requires_the_product_endpoint() -> None:
         model(batch)
 
 
-def test_factory_registers_the_leftnet_bridge_backends() -> None:
-    for backend in ("leftnet", "leftnet_sb"):
-        spec_backend, parameters = model_spec({"backend": backend})
-        assert spec_backend == backend
-        assert parameters["hidden_channels"] == 196
-        assert parameters["num_layers"] == 6
-        assert parameters["num_radial"] == 96
-        assert parameters["cutoff"] == 10.0
-        assert parameters["num_elements"] == 5
-        assert parameters["object_aware"] is True
+def test_factory_registers_the_leftnet_bridge_backend() -> None:
+    spec_backend, parameters = model_spec({"backend": "leftnet_sb"})
+    assert spec_backend == "leftnet_sb"
+    assert parameters["hidden_channels"] == 196
+    assert parameters["num_layers"] == 6
+    assert parameters["num_radial"] == 96
+    assert parameters["cutoff"] == 10.0
+    assert parameters["num_elements"] == 5
+    assert parameters["object_aware"] is True
 
     model = build_model("leftnet_sb", {"hidden_channels": 32, "num_layers": 2, "num_radial": 16})
     assert isinstance(model, LeftNetBridge)
-    assert model_cutoff(model) == 10.0
+    assert model.cutoff == 10.0
     assert model.builds_own_graph is True
     assert model.bridge is True
 

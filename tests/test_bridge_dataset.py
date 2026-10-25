@@ -46,9 +46,9 @@ def _catalog(events: int = 2) -> EventCatalog:
 
 
 def _dataset(**overrides) -> BridgeFlowDataset:
-    parameters = dict(SCHEDULE_KWARGS, seed=7)
+    parameters = dict(seed=7, lowest_step=0)
     parameters.update(overrides)
-    return BridgeFlowDataset(_catalog(), **parameters)
+    return BridgeFlowDataset(_catalog(), SBSchedule(**SCHEDULE_KWARGS), **parameters)
 
 
 def test_bridge_dataset_exposes_the_training_contract() -> None:
@@ -57,8 +57,9 @@ def test_bridge_dataset_exposes_the_training_contract() -> None:
     assert dataset.catalog is not None
     assert dataset.epoch == 0
     assert dataset.seed == 7
-    assert dataset.diagnostic_oracle is False
-    assert dataset.fixed_flow_time is None
+    assert dataset.schedule.timesteps == STEPS
+    assert dataset.lowest_step == 0
+    assert dataset.swap_reactant_product is False
 
 
 def test_bridge_sample_matches_the_schedule_algebra() -> None:
@@ -124,7 +125,7 @@ def test_bridge_dataset_requires_a_transition_state() -> None:
         }
     )
     with pytest.raises(ValueError, match="transition state"):
-        BridgeFlowDataset(broken, **dict(SCHEDULE_KWARGS, seed=7))
+        BridgeFlowDataset(broken, SBSchedule(**SCHEDULE_KWARGS), seed=7)
 
 
 def test_swap_reactant_product_only_swaps_the_two_endpoints():
@@ -139,8 +140,9 @@ def test_swap_reactant_product_only_swaps_the_two_endpoints():
     state = Structure(["H", "H"], np.array([[0.0, 0.0, 0.0], [1.2, 0.0, 0.0]]))
     catalog = EventCatalog(events={"0": Event("0", reactant, product, transition_state=state)})
 
-    plain = BridgeFlowDataset(catalog, timesteps=16, seed=1)[0]
-    swapped = BridgeFlowDataset(catalog, timesteps=16, seed=1, swap_reactant_product=True)[0]
+    schedule = SBSchedule(timesteps=16, beta_max=0.3, power=0.5, inv_power=1.0)
+    plain = BridgeFlowDataset(catalog, schedule, seed=1)[0]
+    swapped = BridgeFlowDataset(catalog, schedule, seed=1, swap_reactant_product=True)[0]
 
     torch.testing.assert_close(swapped.reactant_pos, plain.endpoint_pos)
     torch.testing.assert_close(swapped.endpoint_pos, plain.reactant_pos)

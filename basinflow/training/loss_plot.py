@@ -20,7 +20,7 @@ def _matplotlib():
 
 
 def write_loss_artifacts(training_log: Path, output_dir: Path) -> None:
-    """Aggregate step log records by epoch and write a two-loss plot."""
+    """Aggregate step log records by epoch and write the loss plot."""
     rows: list[dict[str, float]] = []
     with Path(training_log).open(encoding="utf-8") as file:
         reader = csv.DictReader(file, delimiter=" ", skipinitialspace=True)
@@ -35,24 +35,22 @@ def write_loss_artifacts(training_log: Path, output_dir: Path) -> None:
     aggregate_rows = [
         {
             "epoch": epoch,
-            "total_loss": float(np.mean([row["total_loss"] for row in epoch_rows])),
-            "velocity_loss": float(np.mean([row["velocity_loss"] for row in epoch_rows])),
+            "loss": float(np.mean([row["loss"] for row in epoch_rows])),
         }
         for epoch, epoch_rows in sorted(by_epoch.items())
     ]
     with (output_dir / "loss_by_epoch.csv").open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=["epoch", "total_loss", "velocity_loss"])
+        writer = csv.DictWriter(file, fieldnames=["epoch", "loss"])
         writer.writeheader()
         writer.writerows(aggregate_rows)
 
     plt = _matplotlib()
     figure, axis = plt.subplots(figsize=(7, 4.5))
-    for column, label in [("total_loss", "total"), ("velocity_loss", "velocity")]:
-        axis.plot(
-            [row["epoch"] for row in aggregate_rows],
-            [row[column] for row in aggregate_rows],
-            label=label,
-        )
+    axis.plot(
+        [row["epoch"] for row in aggregate_rows],
+        [row["loss"] for row in aggregate_rows],
+        label="bridge loss",
+    )
     axis.set_xlabel("Epoch")
     axis.set_ylabel("Mean training loss")
     axis.legend()

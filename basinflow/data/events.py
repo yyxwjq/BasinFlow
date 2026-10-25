@@ -162,7 +162,6 @@ def load_events(events_dir: str | Path) -> EventCatalog:
 class EventTarget:
     """The supervised R-to-P quantities, derived, never stored."""
 
-    event: Event
     reactant: Structure
     product: Structure
     transition_state: Structure | None
@@ -183,7 +182,6 @@ def event_target(event: Event) -> EventTarget:
         pbc=event.reactant.pbc,
     )
     return EventTarget(
-        event=event,
         reactant=event.reactant,
         product=event.product,
         transition_state=event.transition_state,
@@ -198,10 +196,3 @@ def event_target(event: Event) -> EventTarget:
 def ordered_event_ids(catalog: EventCatalog) -> list[str]:
     """Event ids in ascending integer order: ``"2"`` before ``"10"``."""
     return sorted(catalog.events, key=int)
-
-
-def select_events(
-    catalog: EventCatalog, event_ids: Iterable[str], *, name: str | None = None
-) -> EventCatalog:
-    """Restrict a catalog to the named events, in the requested order."""
-    return catalog.select(event_ids, name=name)

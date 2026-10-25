@@ -120,19 +120,10 @@ class SBSchedule:
         self.mu_x0 = to_torch(mu_x0)
         self.mu_x1 = to_torch(mu_x1)
 
-    @staticmethod
-    def inflate_batch_array(array: Tensor, target: Tensor) -> Tensor:
-        target_shape = (array.size(0),) + (1,) * (len(target.size()) - 1)
-        return array.view(target_shape)
-
     def get_std_fwd(self, step: Tensor, xdim=None) -> Tensor:
         step = step.to(self.mu_x0.device)
         std_fwd = self.std_fwd[step]
         return std_fwd if xdim is None else unsqueeze_xdim(std_fwd, xdim)
-
-    def step_from_time(self, t_sb: Tensor) -> Tensor:
-        """Bridge time in ``(0, 1]`` -> integer schedule index, clamped to range."""
-        return torch.round(t_sb * self.timesteps).long().clamp(0, self.timesteps - 1)
 
 
 def q_sample(

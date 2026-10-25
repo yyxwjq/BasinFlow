@@ -5,14 +5,10 @@ ReactOT scores a generated transition state against the reference with pymatgen'
 reflecting one structure (``ignore_chirality=True``), and caps the value at ``1.0``
 A (``reactot/analyze/rmsd.py:105-129``).
 
-``aligned_rmsd_angstrom`` stays a proper-rotation fit; this module adds the
-reference convention as a second, separately labelled protocol. It reuses
-:func:`kabsch_aligned_rmsd` below, whose
-``mirror_allowed`` branch is the reference reflection rule.
-
-Permutation search (``same_order=False`` in pymatgen) is not implemented: the
-reference TS metric runs with ``same_order=True`` (``pl_trainer.py:1033``), so the
-atoms keep their file order.
+``aligned_rmsd_angstrom`` stays a proper-rotation fit; :func:`dual_protocol_rmsd`
+adds the reference convention as a second, separately labelled protocol. Atom
+order is preserved; permutation search is not needed because the reference runs
+with ``same_order=True`` (``pl_trainer.py:1033``).
 """
 from __future__ import annotations
 
@@ -21,6 +17,32 @@ from typing import Any
 import numpy as np
 
 from basinflow.data import Structure
+
+#: Protocol label for the reference (mirror + cap) convention.
+REACTOT_REFERENCE_PROTOCOL = "reactot_reference_protocol"
+#: ReactOT's ``min(rmsd, 1.0)`` cap, in angstrom.
+REACTOT_RMSD_CAP = 1.0
+
+
+def _movable(first: Structure, second: Structure, reference: Structure) -> tuple[np.ndarray, np.ndarray]:
+    if first.n_atoms != second.n_atoms or first.n_atoms != reference.n_atoms:
+        raise ValueError("structures must have the same atom count")
+    movable = np.asarray(reference.movable_mask, dtype=bool)
+    if not movable.any():
+        movable = np.ones((reference.n_atoms,), dtype=bool)
+    a = np.asarray(first.positions, dtype=float)[movable]
+    b = np.asarray(second.positions, dtype=float)[movable]
+    return a - a.mean(axis=0), b - b.mean(axis=0)
+
+
+def _fit(first: np.ndarray, second: np.ndarray) -> float:
+    """Proper-rotation Kabsch RMSD of two centred coordinate sets."""
+    u, _, vt = np.linalg.svd(first.T @ second)
+    correction = np.eye(3)
+    correction[-1, -1] = np.sign(np.linalg.det(vt.T @ u.T))
+    rotation = vt.T @ correction @ u.T
+    return float(np.sqrt(np.mean(np.sum((first @ rotation.T - second) ** 2, axis=1))))
+
 
 def kabsch_aligned_rmsd(
     a: Structure,
@@ -31,62 +53,16 @@ def kabsch_aligned_rmsd(
 ) -> float:
     """Movable-atom RMSD after optimal rigid alignment.
 
-    ``mirror_allowed=False`` is a proper-rotation fit (``det = +1``);
     ``mirror_allowed=True`` also fits the reflected structure and keeps the lower
     value, which is ReactOT's ``ignore_chirality=True``.
     """
-    if a.n_atoms != b.n_atoms or a.n_atoms != reference.n_atoms:
-        raise ValueError("structures must have the same atom count")
-    movable = np.asarray(reference.movable_mask, dtype=bool)
-    if not movable.any():
-        movable = np.ones((reference.n_atoms,), dtype=bool)
-    first = np.asarray(a.positions, dtype=float)[movable]
-    second = np.asarray(b.positions, dtype=float)[movable]
-    first = first - first.mean(axis=0)
-    second = second - second.mean(axis=0)
+    first, second = _movable(a, b, reference)
+    strict = _fit(first, second)
+    if not mirror_allowed:
+        return strict
     mirrored = second.copy()
     mirrored[:, -1] = -mirrored[:, -1]
-    u, _, vt = np.linalg.svd(first.T @ second)
-    correction = np.eye(3)
-    correction[-1, -1] = np.sign(np.linalg.det(vt.T @ u.T))
-    rotation = vt.T @ correction @ u.T
-    rmsd = float(np.sqrt(np.mean(np.sum((first @ rotation.T - second) ** 2, axis=1))))
-    if not mirror_allowed:
-        return rmsd
-    u, _, vt = np.linalg.svd(first.T @ mirrored)
-    correction = np.eye(3)
-    correction[-1, -1] = np.sign(np.linalg.det(vt.T @ u.T))
-    rotation = vt.T @ correction @ u.T
-    reflected = float(np.sqrt(np.mean(np.sum((first @ rotation.T - mirrored) ** 2, axis=1))))
-    return min(rmsd, reflected)
-
-
-#: Protocol label for the reference (mirror + cap) convention.
-REACTOT_REFERENCE_PROTOCOL = "reactot_reference_protocol"
-#: Protocol label for BasinFlow's existing proper-rotation convention.
-BASINFLOW_STRICT_PROTOCOL = "basinflow_strict_protocol"
-#: ReactOT's ``min(rmsd, 1.0)`` cap, in angstrom.
-REACTOT_RMSD_CAP = 1.0
-
-
-def reactot_reference_rmsd(
-    a: Structure,
-    b: Structure,
-    reference: Structure,
-    *,
-    cap: float | None = REACTOT_RMSD_CAP,
-) -> float:
-    """Reference-convention RMSD over the movable atoms.
-
-    ``min`` of the proper fit and the fit after reflecting ``b`` (ReactOT's
-    ``ignore_chirality=True``), optionally capped. ``reference`` supplies the
-    movable mask and the cell/PBC used for minimum-image wrapping, exactly as in
-    :func:`kabsch_aligned_rmsd`.
-    """
-    value = kabsch_aligned_rmsd(a, b, reference, mirror_allowed=True)
-    if cap is None:
-        return float(value)
-    return float(min(value, float(cap)))
+    return min(strict, _fit(first, mirrored))
 
 
 def dual_protocol_rmsd(
@@ -96,37 +72,30 @@ def dual_protocol_rmsd(
     *,
     cap: float = REACTOT_RMSD_CAP,
 ) -> dict[str, float]:
-    """Both conventions at once.
+    """Both conventions from one alignment.
 
-    Keys:
-
-    * ``strict_aligned_rmsd_angstrom`` -- proper rotation, uncapped (the current
-      BasinFlow primary).
-    * ``strict_clipped_aligned_rmsd_angstrom`` -- the same, capped at ``cap``.
-    * ``reactot_reference_rmsd_angstrom`` -- mirror allowed, capped (ReactOT).
-    * ``reactot_reference_uncapped_rmsd_angstrom`` -- mirror allowed, uncapped;
-      the diagnostic that does *not* saturate at the cap.
-    * ``chirality_gain_angstrom`` -- how much the mirror term alone buys,
-      ``min(strict, cap) - reference``; non-negative by construction.
+    Keys: strict (uncapped/capped), reference (mirror allowed, capped/uncapped)
+    and ``chirality_gain_angstrom``, the non-negative amount the mirror buys.
     """
-    strict = float(kabsch_aligned_rmsd(a, b, reference))
-    mirrored = float(kabsch_aligned_rmsd(a, b, reference, mirror_allowed=True))
+    first, second = _movable(a, b, reference)
+    strict = _fit(first, second)
+    mirrored = second.copy()
+    mirrored[:, -1] = -mirrored[:, -1]
+    # The reference keeps the lower of the proper and reflected fits.
+    reference_value = float(min(strict, _fit(first, mirrored)))
     strict_capped = float(min(strict, cap))
-    mirrored_capped = float(min(mirrored, cap))
+    mirrored_capped = float(min(reference_value, cap))
     return {
         "strict_aligned_rmsd_angstrom": strict,
         "strict_clipped_aligned_rmsd_angstrom": strict_capped,
         "reactot_reference_rmsd_angstrom": mirrored_capped,
-        "reactot_reference_uncapped_rmsd_angstrom": mirrored,
+        "reactot_reference_uncapped_rmsd_angstrom": reference_value,
         "chirality_gain_angstrom": float(max(strict_capped - mirrored_capped, 0.0)),
     }
 
 
-def summarize_rmsds(values: list[float]) -> dict[str, Any]:
-    """Mean/median/min/max for a column, with an explicit ``None`` for empties.
-
-    Keys match ``basinflow.evaluation.transition_state._summary``.
-    """
+def summarize(values: list[float]) -> dict[str, Any]:
+    """Mean/median/min/max for a column, with explicit ``None`` for empties."""
     if not values:
         return {"count": 0, "mean": None, "median": None, "min": None, "max": None}
     array = np.asarray(values, dtype=float)

@@ -13,30 +13,29 @@ next to the reference ones under the same metric.
 | Area | File | Notes |
 | --- | --- | --- |
 | Reference-protocol RMSD | `basinflow/evaluation/reactot_metrics.py` | mirror (`ignore_chirality=True`) + `min(rmsd, 1)`; strict column unchanged |
-| Dual-protocol reporting | `basinflow/evaluation/transition_state.py` | new columns + `reactot_reference_protocol` block |
+| Dual-protocol reporting | `basinflow/evaluation/bridge.py` | strict + `reactot_reference_protocol` blocks |
 | Bridge schedule + algebra | `basinflow/models/sb.py` | `SBSchedule`, `q_sample`, `compute_label`, `compute_pred_x0`, `posterior_step`, `make_bridge_ode_field` |
 | LEFTNet layers | `basinflow/models/leftnet/layers.py` | `torch_scatter` replaced by local reductions |
-| LEFTNet backbone | `basinflow/models/leftnet/leftnet.py` | switch semantics preserved (`reflect_equiv`, `object_aware`, `legacy`, `update`, `single_layer_output`, `pos_grad`) |
+| LEFTNet backbone | `basinflow/models/leftnet/leftnet.py` | switch semantics preserved (`reflect_equiv`, `object_aware`, `legacy`, `update`, `single_layer_output`) |
 | `EventData` adapter | `basinflow/models/leftnet/adapter.py` | `LeftNetBridge`: R/TS/P fragment layout, per-fragment 6->12->6 encoders, TS-block-only readout, per-sample mean removal |
 | Reference checkpoint | `basinflow/models/reference.py` | maps `ddpm.dynamics.{model,encoders,decoders}` onto the port; strict 246/246 key match |
-| Bridge dataset view | `basinflow/data/samples.py::BridgeFlowDataset` | emits `pos = x_t`, `target_scaled = (x_t - x0)/sigma_t`, `flow_time = step/T` |
+| Dataset view | `basinflow/data/samples.py::BridgeFlowDataset` | the one view: emits `pos = x_t`, `target_scaled = (x_t - x0)/sigma_t`, `flow_time = step/T` |
 | Bridge sampler | `basinflow/evaluation/bridge.py::run_bridge_trials` | `progress = 1 - t_sb` reparameterisation of the reference ODE |
-| Objective selection | `basinflow/models/loss.py` | `"scaled"` key selects the bridge MSE/L1; velocity runs untouched |
-| Backend registration | `basinflow/models/factory.py` | `leftnet`, `leftnet_sb` |
+| Objective | `basinflow/models/loss.py` | one `bridge_loss` (MSE or L1) over movable atoms |
+| Backend registration | `basinflow/models/factory.py` | `leftnet_sb`, `painn`, `egnn`: same contract, different architecture |
 | EMA | `basinflow/training/loop.py` | optional; the reference callback inverts the coefficient (see §2) |
 | Reference batching | `basinflow/training/batch_sampler.py` | `node^2`, `max_num = 2800`, seed 42 |
 | Adaptive clipping | `basinflow/training/grad_clip.py` | `1.5*mean + 3*std`, queue 50 seeded with 3000 |
-| TS loss scale | `basinflow/models/loss.py` | `scales[1] = 2` |
-| Workflow | `basinflow/workflows/transition_state.py` | bridge branch: dataset, sampler, optional EMA scoring |
+| Workflow | `basinflow/workflows/transition_state.py` | one bridge branch for every backend, optional EMA scoring |
 | Data conversion | `tools/transition1x_reactot_to_events.py` | official rpsb pickles → flat `events/` + `split.csv` |
 | Reference shim | `tools/reactot_compat/torch_scatter.py` | PyG/torch implementation for the reference repo only |
 
 Tests covering this path: `test_reactot_metrics.py`,
 `test_reactot_data_conversion.py`, `test_leftnet_equivariance.py`,
 `test_sb_bridge.py`, `test_bridge_dataset.py`, `test_bridge_sampler.py`,
-`test_leftnet_sb_workflow.py`, `test_reference_training.py`. The suite targets the
-ReactOT path only; the PaiNN/EGNN baseline code is kept but has no dedicated
-workflow tests. Local suite: **94 passed**.
+`test_leftnet_sb_workflow.py` (all three backends), `test_reference_training.py`,
+`test_geometry_graph.py` (minimum image and periodic graphs) and
+`test_ode_sampler.py`. Local suite: **105 passed**.
 
 ### 1.1 Verified data: what the two pickles actually contain
 
@@ -99,7 +98,6 @@ released pickles win, because they are what produced the checkpoint:
 | Initialisation | fine-tuned from the OA-ReactDiff checkpoint, 200 extra epochs at lr 1e-4 | `train_rpsb_ts1x.py` trains from scratch, `max_epochs = 3000`, early stop on `val_ep_scaled_err`; the released ckpt records `epoch=0, global_step=200` | trains from scratch for 600k steps (3000 x 200); `init_checkpoint` can warm-start from a BasinFlow or ReactOT checkpoint, but the OA file is not distributed |
 | R/P swap | not stated | training script `False`, released ckpt hyper-parameters `True` | `swap_reactant_product` option, default `False` (script value); validation and scoring always use the canonical order |
 | R/P alignment | Kabsch-aligns R and P before building `(R+P)/2` | `ProcessedTS1x` only centers each frame; the released pickles carry arbitrary orientations | follows the pickles: per-frame centroid, no Kabsch. The reference metric is Kabsch-aligned, so orientation is absorbed at scoring time |
-| R/P swap | not stated | `swapping_react_prod=False` in the training script, but `True` in the released ckpt hyper-parameters | `False` (script value); the option is not exposed yet |
 
 None of these can be resolved from the paper alone. They are recorded so a
 disagreement with 0.103 A can be attributed rather than guessed at.
@@ -138,20 +136,24 @@ reference.
    L2 objective `mse` (`l1` is the alternative).
 6. **`eval_num_steps = 11`** matches the reference's `nfe = 10`
    (`torchdiffeq` is given `nfe + 1` saved points).
-7. **`is_bridge` has no velocity alias.** The bridge backend deliberately does
-   not emit `{"velocity": ...}`, so `validate_each_epoch` is rejected for bridge
-   runs; scoring always goes through the bridge sampler.
+7. **One output contract for every backend.** `leftnet_sb`, `painn` and `egnn`
+   all emit `{"scaled": ...}` and are scored by the bridge sampler. There is no
+   separate velocity arm; the PaiNN/EGNN backbones are trained on the same
+   bridge residual as LEFTNet.
+8. **Periodic frames.** The ReactOT/Transition1x path is molecular, so
+   `leftnet_sb` rejects `pbc = True` instead of silently dropping the lattice.
+   `painn` and `egnn` use the shared minimum-image graph builder and do support
+   periodic cells.
 
 Reference behaviour that is now implemented (no longer listed as a deviation):
 
 * **`node^2` batch sampler.** `basinflow/training/batch_sampler.py` packs a batch
   until `sum(n_atoms ** 2) > 2800`, drawing a fresh permutation per epoch from a
-  generator seeded with 42 (`reactot/dataset/sampler.py:105`). The bridge workflow
-  selects it by default; `[training] batch_sampler = samples` restores fixed
-  batches for the PaiNN/EGNN arm.
+  generator seeded with 42 (`reactot/dataset/sampler.py:105`). Every backend uses
+  it by default; `[training] batch_sampler = samples` restores fixed batches.
 * **Adaptive gradient clipping.** `basinflow/training/grad_clip.py` clips at
   `1.5 * mean + 3 * std` of a 50-entry queue seeded with `3000` and records
-  `min(grad_norm, bound)` (`pl_trainer.py:455-485`). Default for the bridge;
+  `min(grad_norm, bound)` (`pl_trainer.py:455-485`). Default for every backend;
   `[training] grad_clip = fixed` restores `max_grad_norm`.
 * **Plain-MSE objective.** `SBModule.compute_loss` returns `EnSB.forward`'s
   `F.mse_loss(pred, label)`; the `scales = [1, 2, 1]` normalisation belongs to
@@ -161,8 +163,8 @@ Reference behaviour that is now implemented (no longer listed as a deviation):
   N epochs; the training state is always written once at the end. Saving all 3000
   epochs would be several hundred GB.
 * **200 batches per epoch.** `[training] limit_train_batches` defaults to 200 for
-  the bridge, so 3000 epochs is exactly the reference's 600k steps and the sampler
-  reshuffles on the reference's cadence.
+  every backend, so 3000 epochs is exactly the reference's 600k steps and the
+  sampler reshuffles on the reference's cadence.
 * **Per-epoch validation and best-checkpoint selection.** `val_ep_scaled_err` is
   the per-batch `mean(|(pred-label)/max|label||)` averaged over the first
   `limit_val_batches = 20` validation batches, with the reference's `3 * 2800`
@@ -321,7 +323,6 @@ swap_reactant_product = false
 # init_checkpoint = /path/to/reactot-pretrained.ckpt
 
 [loss]
-velocity_weight = 1.0
 norm = mse
 
 [runtime]
@@ -339,11 +340,17 @@ solver_rtol = 1.0e-2
 ```
 
 `batch_sampler`, `max_num`, `grad_clip`, `validate_each_epoch`, `validation_split`,
-`limit_val_batches` and `val_max_num` default to the reference behaviour for
-`leftnet_sb`; they are spelled out here so the run is self-describing.
-`max_grad_norm` is only used by the fixed-clip arm. `init_checkpoint` is optional:
-it accepts a BasinFlow checkpoint or the released ReactOT `.ckpt` (set
-`REACTOT_SRC` so the class can be unpickled).
+`limit_val_batches` and `val_max_num` default to the reference behaviour for every
+backend; they are spelled out here so the run is self-describing. `max_grad_norm`
+is only used by the fixed-clip arm. `init_checkpoint` is optional: it accepts a
+BasinFlow checkpoint or the released ReactOT `.ckpt` (set `REACTOT_SRC` so the
+class can be unpickled).
+
+Selecting another architecture only changes `[model]`: use `backend = painn`
+(`num_features`, `num_radial_basis`, `r_max`, `time_dim`, `num_elements`,
+`stability_mode`) or `backend = egnn` (`hidden_dim`, `num_layers`, `cutoff`,
+`max_atomic_number`). The `[data]`, `[bridge]`, `[training]`, `[loss]`,
+`[runtime]` and `[evaluation]` sections stay identical.
 
 ### 3.3 Reference baseline (the 0.103 Å number)
 
@@ -377,7 +384,7 @@ checkpoint.pt          scored weights (best val_ep_scaled_err epoch)
 best.pt                best epoch by val_ep_scaled_err (model state + metric)
 training_state.pt      full state incl. optimizer, RNG and EMA copy (resume source)
 config.resolved.ini    effective config, incl. the solver actually used
-training.log           epoch/step/total_loss/velocity_loss
+training.log           epoch/step/loss
 sampling/summary.json  strict + reactot_reference_protocol blocks
 sampling/trial_metrics.csv
 ```

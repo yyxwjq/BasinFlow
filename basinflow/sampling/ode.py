@@ -45,14 +45,11 @@ def sample_ode(
     rtol: float = DEFAULT_RTOL,
     method: str = DEFAULT_METHOD,
     max_num_steps: int = 100000,
-    record: bool = False,
 ) -> tuple[Any, dict[str, Any]]:
     """Integrate ``dx/dt = field(x, t)`` from ``t0`` to ``t1``.
 
     ``field`` receives the current state and the current time (a 0-dim tensor) and
-    returns the state-shaped velocity. Returns ``(final_state, report)``; with
-    ``record=True`` the report also carries ``"states"``, the trajectory on the
-    saved-point grid, which is what a written trajectory is.
+    returns the state-shaped velocity. Returns ``(final_state, report)``.
     """
     require_odeint()
     if method not in METHODS:
@@ -119,8 +116,6 @@ def sample_ode(
         # tol/interval are integration controls, not reports.
         "integration_steps": _integration_steps(t1, t0, num_steps, method),
     }
-    if record:
-        report["states"] = [state for state in trajectory]
     return trajectory[-1], report
 
 

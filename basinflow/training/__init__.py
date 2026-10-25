@@ -1,13 +1,4 @@
 from basinflow.training.loss_plot import write_loss_artifacts
-from basinflow.training.loop import (
-    evaluate_velocity,
-    train_epoch,
-    train_loop,
-)
+from basinflow.training.loop import train_epoch, train_loop
 
-__all__ = [
-    "evaluate_velocity",
-    "train_epoch",
-    "train_loop",
-    "write_loss_artifacts",
-]
+__all__ = ["train_epoch", "train_loop", "write_loss_artifacts"]

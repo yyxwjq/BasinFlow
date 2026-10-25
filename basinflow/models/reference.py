@@ -17,6 +17,38 @@ import torch
 
 from basinflow.models.leftnet.adapter import LeftNetBridge
 
+
+def _install_torch_scatter_stub() -> None:
+    """Let ``torch.load`` unpickle the reference classes without compiling PyG.
+
+    ``reactot.model`` imports ``torch_scatter`` at import time.  This module only
+    reads the checkpoint's ``state_dict``/``hyper_parameters``; it never runs the
+    reference forward, so a stub with the imported names is sufficient.
+    """
+    try:
+        import torch_scatter  # noqa: F401
+        return
+    except ModuleNotFoundError:
+        pass
+    import types
+
+    stub = types.ModuleType("torch_scatter")
+
+    def unavailable(*args, **kwargs):
+        raise RuntimeError("torch_scatter is not installed; the reference forward is not used")
+
+    for name in (
+        "scatter",
+        "scatter_mean",
+        "scatter_add",
+        "scatter_max",
+        "scatter_min",
+        "segment_coo",
+        "segment_csr",
+    ):
+        setattr(stub, name, unavailable)
+    sys.modules["torch_scatter"] = stub
+
 _MODEL_PREFIX = "ddpm.dynamics.model."
 _DYNAMICS_PREFIX = "ddpm.dynamics."
 
@@ -31,6 +63,7 @@ def load_reactot_checkpoint(
     source = reference_src or os.environ.get("REACTOT_SRC")
     if source is not None and str(source) not in sys.path:
         sys.path.insert(0, str(source))
+    _install_torch_scatter_stub()
     checkpoint = torch.load(Path(path), map_location="cpu", weights_only=False)
     if "state_dict" not in checkpoint or "hyper_parameters" not in checkpoint:
         raise ValueError(f"{path} is not a ReactOT Lightning checkpoint")

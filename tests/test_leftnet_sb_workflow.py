@@ -1,18 +1,16 @@
 """End-to-end contract for the ``leftnet_sb`` (ReactOT bridge) workflow.
 
 This walks the real pipeline -- converter -> workflow -> checkpoint -> bridge
-scorer -- and asserts that a bridge run switches its data view, its objective,
-its sampler and its reported weights together. A run that trained on the bridge
-pairs but scored a velocity field, or reported raw weights when EMA was
-requested, would silently measure a different model.
+scorer -- and asserts that every backend uses the same data view, objective and
+sampler, and reports the weights it actually scored. A run that trained one
+objective but scored another, or reported raw weights when EMA was requested,
+would silently measure a different model.
 """
 from __future__ import annotations
 
 import configparser
 import json
 import math
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -29,16 +27,27 @@ def events_dir(tmp_path: Path) -> Path:
 
 
 def _config(tmp_path: Path, events_dir: Path, *, output_name: str = "bridge_run",
-            validate_each_epoch: bool = False, ema_decay: str | None = "0.9") -> Path:
+            backend: str = "leftnet_sb", validate_each_epoch: bool = False,
+            ema_decay: str | None = "0.9") -> Path:
     parser = configparser.ConfigParser()
     parser["data"] = {"events_dir": str(events_dir), "auto_split": "true"}
     parser["output"] = {"output_dir": str(tmp_path / output_name), "log_to_stdout": "false"}
     parser["split"] = {"train": "0.5", "val": "0.5", "test": "0.0", "seed": "7"}
-    parser["model"] = {
-        "backend": "leftnet_sb", "num_features": "16", "num_layers": "1", "num_radial": "6",
-        "cutoff": "5.0", "num_elements": "5", "legacy": "true", "update": "true",
-        "single_layer_output": "true", "object_aware": "true", "reflect_equiv": "true",
-    }
+    model = {"backend": backend, "num_layers": "1", "cutoff": "5.0"}
+    if backend == "leftnet_sb":
+        model.update({
+            "num_features": "16", "num_radial": "6", "num_elements": "5",
+            "legacy": "true", "update": "true", "single_layer_output": "true",
+            "object_aware": "true", "reflect_equiv": "true",
+        })
+    elif backend == "painn":
+        model.update({
+            "num_features": "16", "num_radial_basis": "6", "num_elements": "119",
+            "r_max": "5.0", "time_dim": "8", "stability_mode": "scaled",
+        })
+    else:
+        model.update({"hidden_dim": "16", "max_atomic_number": "10"})
+    parser["model"] = model
     parser["bridge"] = {"timesteps": "16", "beta_max": "0.3", "power": "0.5", "inv_power": "1"}
     training = {"epochs": "1", "max_steps": "2", "lr": "0.001", "batch_size": "2",
                 "optimizer": "adamw", "amsgrad": "true", "save_each_epoch": "false", "seed": "7",
@@ -46,7 +55,7 @@ def _config(tmp_path: Path, events_dir: Path, *, output_name: str = "bridge_run"
     if ema_decay is not None:
         training["ema_decay"] = ema_decay
     parser["training"] = training
-    parser["loss"] = {"velocity_weight": "1.0", "norm": "mse"}
+    parser["loss"] = {"norm": "mse"}
     parser["runtime"] = {"device": "cpu", "cpu_threads": "1"}
     parser["evaluation"] = {"eval_num_steps": "4", "trials_per_event": "1", "sampling_seed": "5",
                             "split": "test", "integrator": "euler", "solver_atol": "0.01",
@@ -145,3 +154,23 @@ def test_bridge_workflow_resumes_from_the_latest_complete_checkpoint(tmp_path, e
 
     state = torch.load(tmp_path / "resume_run" / "training_state.pt", map_location="cpu", weights_only=False)
     assert state["config"]["completed_steps"] == 2
+
+
+@pytest.mark.parametrize("backend", ["painn", "egnn"])
+def test_every_backend_uses_the_same_bridge_workflow(tmp_path, events_dir, backend):
+    """PaiNN and EGNN are interchangeable with LEFTNet, not separate pipelines."""
+    from basinflow.workflows.transition_state import run_transition1x_ts
+
+    config = _config(tmp_path, events_dir, output_name=backend, backend=backend,
+                     ema_decay=None)
+    text = config.read_text(encoding="utf-8").replace("max_steps = 2", "max_steps = 1")
+    config.write_text(text, encoding="utf-8")
+
+    report = run_transition1x_ts(config)
+
+    assert report["backend"] == backend
+    assert report["training_contract"] == "schrodinger_bridge_rp_to_transition_state"
+    assert report["evaluation"]["evaluation_protocol"] == "reactot_bridge_ode"
+    saved = torch.load(tmp_path / backend / "checkpoint.pt", map_location="cpu", weights_only=False)
+    assert saved["model_backend"] == backend
+    assert saved["evaluated_weights"] == "raw"

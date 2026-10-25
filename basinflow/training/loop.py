@@ -1,16 +1,15 @@
-"""PyG-based product-flow training loop."""
+"""The single PyG training loop for every R + P -> TS bridge backend."""
 from __future__ import annotations
 
 import copy
-from pathlib import Path
-from dataclasses import asdict
-from itertools import islice
 import hashlib
 import json
+from itertools import islice
+from pathlib import Path
 
 import numpy as np
 
-from basinflow.models import FlowLossWeights, flow_loss
+from basinflow.models import bridge_loss
 from basinflow.training.batch_sampler import NodeSquareBatchSampler
 from basinflow.training.grad_clip import AdaptiveGradClipper
 from basinflow.training.validation import evaluate_bridge_scaled_error
@@ -21,16 +20,12 @@ def _torch():
         import torch
         from torch_geometric.loader import DataLoader
     except ImportError as exc:  # pragma: no cover - optional model dependency
-        raise ImportError("product-flow training requires basinflow[models]") from exc
+        raise ImportError("bridge training requires basinflow[models]") from exc
     return torch, DataLoader
 
 
-def build_ema(model, decay: float):
-    """A frozen, exponentially averaged copy of ``model``.
-
-    Buffers are copied at construction and refreshed on every step; only
-    floating-point parameters are averaged.
-    """
+def build_ema(model):
+    """A frozen, exponentially averaged copy of ``model``."""
     ema = copy.deepcopy(model)
     for parameter in ema.parameters():
         parameter.requires_grad_(False)
@@ -49,16 +44,6 @@ def update_ema(ema, model, decay: float) -> None:
             ema_buffer.copy_(buffer)
 
 
-def _as_event_flow_dataset(dataset, initializers, *, flow_time):
-    # Any prepared dataset that carries a catalog and can advance its epoch is
-    # already in the right form.
-    if hasattr(dataset, "catalog") and hasattr(dataset, "set_epoch"):
-        return dataset
-    raise TypeError(
-        "dataset must be a prepared event dataset (TransitionStateDataset or BridgeFlowDataset)"
-    )
-
-
 def _batch_size(value, dataset) -> int:
     if isinstance(value, str):
         if value.strip().lower() == "full":
@@ -70,29 +55,47 @@ def _batch_size(value, dataset) -> int:
     return value
 
 
-def _dataset_signature(dataset):
+def _check_dataset(dataset) -> None:
+    if not hasattr(dataset, "catalog") or not hasattr(dataset, "set_epoch"):
+        raise TypeError("dataset must be a prepared BridgeFlowDataset")
+
+
+def _dataset_signature(dataset) -> str:
     digest = hashlib.sha256()
-    digest.update(json.dumps({
-        'event_ids': dataset.catalog.event_ids,
-        'initializers': [repr(value) for value in getattr(dataset, 'initializers', ())],
-        'seed': dataset.seed, 'flow_time': dataset.fixed_flow_time,
-        'diagnostic_oracle': getattr(dataset, 'diagnostic_oracle', False),
-        'swap_reactant_product': getattr(dataset, 'swap_reactant_product', False),
-        'lowest_step': getattr(dataset, 'lowest_step', 0),
-        'timesteps': getattr(dataset, 'timesteps', None),
-    }, sort_keys=True).encode())
+    digest.update(
+        json.dumps(
+            {
+                "event_ids": dataset.catalog.event_ids,
+                "seed": dataset.seed,
+                "lowest_step": dataset.lowest_step,
+                "timesteps": dataset.schedule.timesteps,
+                "swap_reactant_product": dataset.swap_reactant_product,
+            },
+            sort_keys=True,
+        ).encode()
+    )
     for event_id in dataset.catalog.event_ids:
         event = dataset.catalog.events[event_id]
-        digest.update(json.dumps({
-            'event_id': event.event_id,
-            'metadata': {key: str(value) for key, value in event.metadata.items()},
-            'has_transition_state': event.transition_state is not None,
-        }, sort_keys=True).encode())
+        digest.update(
+            json.dumps(
+                {
+                    "event_id": event.event_id,
+                    "metadata": {key: str(value) for key, value in event.metadata.items()},
+                    "has_transition_state": event.transition_state is not None,
+                },
+                sort_keys=True,
+            ).encode()
+        )
         for structure in (event.reactant, event.product, event.transition_state):
             if structure is None:
                 continue
             digest.update(json.dumps(structure.species).encode())
-            for values in (structure.positions, structure.cell, structure.pbc, structure.movable_mask):
+            for values in (
+                structure.positions,
+                structure.cell,
+                structure.pbc,
+                structure.movable_mask,
+            ):
                 digest.update(np.ascontiguousarray(values).tobytes())
     return digest.hexdigest()
 
@@ -100,15 +103,13 @@ def _dataset_signature(dataset):
 def train_epoch(
     model,
     dataset,
-    initializers_or_optimizer,
-    optimizer=None,
+    optimizer,
     *,
     device=None,
     batch_size: int | str = 1,
-    loss_weights: FlowLossWeights | None = None,
+    loss_norm: str = "mse",
     start_step: int = 0,
     log_step=None,
-    t: float | None = None,
     max_steps: int | None = None,
     max_grad_norm: float | None = 10.0,
     scheduler=None,
@@ -117,21 +118,16 @@ def train_epoch(
     batch_sampler=None,
     grad_clipper=None,
 ) -> dict[str, float]:
-    """Train one epoch from prepared PyG samples."""
+    """Train one epoch, or ``max_steps`` optimizer steps."""
     if max_steps is not None and max_steps <= 0:
         raise ValueError("max_steps must be positive")
     if max_grad_norm is not None and (not np.isfinite(max_grad_norm) or max_grad_norm <= 0):
         raise ValueError("max_grad_norm must be finite and positive")
     torch, DataLoader = _torch()
-    if optimizer is None:
-        optimizer = initializers_or_optimizer
-        initializers = None
-    else:
-        initializers = initializers_or_optimizer
-    dataset = _as_event_flow_dataset(dataset, initializers, flow_time=t)
+    _check_dataset(dataset)
     batch_size = _batch_size(batch_size, dataset)
     model.train()
-    totals = {"loss": 0.0, "velocity_loss": 0.0}
+    totals = {"loss": 0.0}
     if batch_sampler is not None:
         loader = DataLoader(dataset, batch_sampler=batch_sampler)
     else:
@@ -142,10 +138,9 @@ def train_epoch(
         if device is not None:
             batch = batch.to(device)
         optimizer.zero_grad()
-        output = model(batch)
-        loss, parts = flow_loss(output, batch, loss_weights)
+        loss = bridge_loss(model(batch), batch, norm=loss_norm)
         if not torch.isfinite(loss):
-            raise FloatingPointError("non-finite product-flow training loss")
+            raise FloatingPointError("non-finite bridge training loss")
         loss.backward()
         if grad_clipper is not None:
             grad_clipper.step(model.parameters())
@@ -162,12 +157,8 @@ def train_epoch(
             update_ema(ema, model, float(ema_decay))
         batches += 1
         num_items += int(batch.num_graphs)
-        values = {
-            "loss": float(loss.detach().cpu()),
-            "velocity_loss": float(parts["velocity_loss"].detach().cpu()),
-        }
-        for name, value in values.items():
-            totals[name] += value
+        values = {"loss": float(loss.detach().cpu())}
+        totals["loss"] += values["loss"]
         if log_step is not None:
             log_step(start_step + step, values)
     if batches == 0:
@@ -180,62 +171,9 @@ def train_epoch(
     }
 
 
-def evaluate_velocity(
-    model,
-    dataset,
-    initializers=None,
-    *,
-    device=None,
-    batch_size: int | str = 1,
-    t: float | None = None,
-) -> dict[str, float]:
-    """Evaluate fixed epoch-zero pairwise movable-coordinate velocity MSE."""
-    torch, DataLoader = _torch()
-    dataset = _as_event_flow_dataset(dataset, initializers, flow_time=t)
-    if len(dataset) == 0:
-        raise ValueError("validation dataset must contain at least one item")
-    batch_size = _batch_size(batch_size, dataset)
-    was_training = model.training
-    previous_epoch = dataset.epoch
-    squared_error = 0.0
-    num_components = num_items = num_batches = 0
-    loader = DataLoader(
-        dataset, batch_size=batch_size, shuffle=False,
-        generator=torch.Generator().manual_seed(0),
-    )
-    try:
-        dataset.set_epoch(0)
-        model.eval()
-        with torch.no_grad():
-            for batch in loader:
-                if device is not None:
-                    batch = batch.to(device)
-                velocity = model(batch)["velocity"]
-                if not torch.isfinite(velocity).all():
-                    raise FloatingPointError("non-finite product-flow validation velocity")
-                error = (velocity - batch.target_velocity)[batch.movable_mask]
-                batch_error = error.double().square().sum()
-                if not torch.isfinite(batch_error):
-                    raise FloatingPointError("non-finite product-flow validation loss")
-                squared_error += float(batch_error.cpu())
-                num_components += error.numel()
-                num_items += int(batch.num_graphs)
-                num_batches += 1
-    finally:
-        dataset.set_epoch(previous_epoch)
-        model.train(was_training)
-    return {
-        "velocity_loss": squared_error / num_components if num_components else 0.0,
-        "num_components": num_components,
-        "num_items": num_items,
-        "num_batches": num_batches,
-    }
-
-
 def train_loop(
     model,
     dataset,
-    initializers=None,
     *,
     epochs: int = 1,
     lr: float = 1e-3,
@@ -244,12 +182,9 @@ def train_loop(
     log_to_stdout: bool = False,
     device=None,
     batch_size: int | str = 1,
-    loss_weights: FlowLossWeights | None = None,
-    t: float | None = None,
+    loss_norm: str = "mse",
     max_steps: int | None = None,
     max_grad_norm: float | None = 10.0,
-    validation_dataset=None,
-    validation_batch_size: int | str | None = None,
     epoch_checkpoint_dir: str | Path | None = None,
     optimizer_name: str = "adam",
     amsgrad: bool = False,
@@ -270,7 +205,7 @@ def train_loop(
     best_checkpoint_path: str | Path | None = None,
     save_every_n_epochs: int = 1,
 ) -> list[dict[str, float]]:
-    """Train a model from a prepared event dataset."""
+    """Train a bridge model, validating and checkpointing on the reference cadence."""
     if epochs <= 0:
         raise ValueError("epochs must be positive")
     if max_steps is not None and max_steps <= 0:
@@ -298,8 +233,10 @@ def train_loop(
         raise ValueError("validation_max_batches must be a positive integer or None")
     if int(save_every_n_epochs) <= 0:
         raise ValueError("save_every_n_epochs must be a positive integer")
+
     torch, _ = _torch()
-    ema = build_ema(model, ema_decay) if ema_decay is not None else None
+    _check_dataset(dataset)
+    ema = build_ema(model) if ema_decay is not None else None
     best_score = float("inf")
     best_epoch = 0
     best_state = None
@@ -309,30 +246,30 @@ def train_loop(
         best_score = float(saved_best.get("val_scaled_err", float("inf")))
         best_epoch = int(saved_best.get("epoch", 0))
         best_state = saved_best.get("model_state_dict")
-    dataset = _as_event_flow_dataset(dataset, initializers, flow_time=t)
+
     sampler = None
     if batch_sampler == "node2":
         sizes = [event.reactant.n_atoms for event in dataset.catalog.events.values()]
         sampler = NodeSquareBatchSampler(sizes, max_num=max_num)
     clipper = AdaptiveGradClipper() if adaptive_clip else None
-    if validation_dataset is not None:
-        validation_dataset = _as_event_flow_dataset(validation_dataset, initializers, flow_time=t)
-        if len(validation_dataset) == 0:
+    if bridge_validation_dataset is not None:
+        _check_dataset(bridge_validation_dataset)
+        if len(bridge_validation_dataset) == 0:
             raise ValueError("validation dataset must contain at least one item")
-        validation_batch_size = _batch_size(
-            batch_size if validation_batch_size is None else validation_batch_size,
-            validation_dataset,
-        )
+
     optimizer_type = torch.optim.Adam if optimizer_name == "adam" else torch.optim.AdamW
     optimizer = optimizer_type(
         model.parameters(), lr=float(lr), amsgrad=amsgrad,
         weight_decay=float(weight_decay),
     )
     scheduler = build_scheduler(
-        optimizer, name=scheduler_name, total_steps=total_scheduler_steps(
+        optimizer,
+        name=scheduler_name,
+        total_steps=total_scheduler_steps(
             epochs, dataset, batch_size, max_steps, max_batches_per_epoch
         ),
-        warmup_fraction=warmup_fraction, min_lr_fraction=min_lr_fraction,
+        warmup_fraction=warmup_fraction,
+        min_lr_fraction=min_lr_fraction,
     )
     history: list[dict[str, float]] = []
     completed_epochs = 0
@@ -341,36 +278,45 @@ def train_loop(
     signature = _dataset_signature(dataset)
     resume_step = 0
     if resume_from is not None:
-        saved = torch.load(resume_from, map_location='cpu', weights_only=False)
-        if not saved.get('epoch_complete', False):
-            raise ValueError('resume requires a complete epoch checkpoint; partial sampler state is unavailable')
-        if saved.get('training_dataset_sha256') != signature:
-            raise ValueError('resume dataset identity or training inputs differ')
-        requested = {'lr': float(lr), 'optimizer_name': optimizer_name, 'amsgrad': amsgrad,
-                     'weight_decay': float(weight_decay), 'batch_size': batch_size,
-                     'max_grad_norm': max_grad_norm, 'scheduler_name': scheduler_name,
-                     'warmup_fraction': float(warmup_fraction),
-                     'min_lr_fraction': float(min_lr_fraction),
-                     'batch_sampler': batch_sampler, 'max_num': int(max_num),
-                     'adaptive_clip': bool(adaptive_clip),
-                     'max_batches_per_epoch': max_batches_per_epoch,
-                     'loss_weights': asdict(loss_weights or FlowLossWeights())}
+        saved = torch.load(resume_from, map_location="cpu", weights_only=False)
+        if not saved.get("epoch_complete", False):
+            raise ValueError(
+                "resume requires a complete epoch checkpoint; partial sampler state is unavailable"
+            )
+        if saved.get("training_dataset_sha256") != signature:
+            raise ValueError("resume dataset identity or training inputs differ")
+        requested = {
+            "lr": float(lr),
+            "optimizer_name": optimizer_name,
+            "amsgrad": amsgrad,
+            "weight_decay": float(weight_decay),
+            "batch_size": batch_size,
+            "max_grad_norm": max_grad_norm,
+            "scheduler_name": scheduler_name,
+            "warmup_fraction": float(warmup_fraction),
+            "min_lr_fraction": float(min_lr_fraction),
+            "batch_sampler": batch_sampler,
+            "max_num": int(max_num),
+            "adaptive_clip": bool(adaptive_clip),
+            "max_batches_per_epoch": max_batches_per_epoch,
+            "loss_norm": loss_norm,
+        }
         if ema_decay is not None:
-            requested['ema_decay'] = ema_decay
-        if any(saved['config'].get(key) != value for key, value in requested.items()):
-            raise ValueError('resume optimizer, batch, or loss configuration differs')
-        completed_epochs = int(saved['completed_epochs'])
-        resume_step = int(saved['completed_steps'])
+            requested["ema_decay"] = ema_decay
+        if any(saved["config"].get(key) != value for key, value in requested.items()):
+            raise ValueError("resume optimizer, batch, or loss configuration differs")
+        completed_epochs = int(saved["completed_epochs"])
+        resume_step = int(saved["completed_steps"])
         if epochs <= completed_epochs or (max_steps is not None and max_steps <= resume_step):
-            raise ValueError('resume budget must exceed completed training')
-        model.load_state_dict(saved['model_state_dict'], strict=True)
-        if ema is not None and saved.get('ema_model_state_dict') is not None:
-            ema.load_state_dict(saved['ema_model_state_dict'], strict=True)
-        optimizer.load_state_dict(saved['optimizer_state_dict'])
-        torch.set_rng_state(saved['torch_rng_state'])
-        if torch.cuda.is_available() and saved.get('cuda_rng_state_all'):
-            torch.cuda.set_rng_state_all(saved['cuda_rng_state_all'])
-        history = saved['history']
+            raise ValueError("resume budget must exceed completed training")
+        model.load_state_dict(saved["model_state_dict"], strict=True)
+        if ema is not None and saved.get("ema_model_state_dict") is not None:
+            ema.load_state_dict(saved["ema_model_state_dict"], strict=True)
+        optimizer.load_state_dict(saved["optimizer_state_dict"])
+        torch.set_rng_state(saved["torch_rng_state"])
+        if torch.cuda.is_available() and saved.get("cuda_rng_state_all"):
+            torch.cuda.set_rng_state_all(saved["cuda_rng_state_all"])
+        history = saved["history"]
 
     def save_checkpoint(path):
         path = Path(path)
@@ -380,7 +326,9 @@ def train_loop(
                 "model_state_dict": model.state_dict(),
                 "optimizer_state_dict": optimizer.state_dict(),
                 "torch_rng_state": torch.get_rng_state(),
-                "cuda_rng_state_all": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [],
+                "cuda_rng_state_all": (
+                    torch.cuda.get_rng_state_all() if torch.cuda.is_available() else []
+                ),
                 "history": history,
                 "epoch": epoch,
                 "completed_epochs": completed_epochs,
@@ -403,7 +351,7 @@ def train_loop(
                     "scheduler_name": scheduler_name,
                     "warmup_fraction": float(warmup_fraction),
                     "min_lr_fraction": float(min_lr_fraction),
-                    "loss_weights": asdict(loss_weights or FlowLossWeights()),
+                    "loss_norm": loss_norm,
                     "batch_sampler": batch_sampler,
                     "max_num": int(max_num),
                     "adaptive_clip": bool(adaptive_clip),
@@ -416,45 +364,35 @@ def train_loop(
                     "best_val_scaled_err": None if best_score == float("inf") else best_score,
                     "best_epoch": best_epoch,
                     "early_stopped": early_stopped,
-                    "diagnostic_oracle": dataset.diagnostic_oracle,
                     "dataset_seed": dataset.seed,
                     "ema_decay": ema_decay,
                     "completed_steps": step,
-                    "validation_dataset_seed": None if validation_dataset is None else validation_dataset.seed,
-                    "validation_epoch": None if validation_dataset is None else 0,
-                    "validation_batch_size": validation_batch_size,
                 },
             },
             path,
         )
 
     if scheduler is not None and resume_step:
-        # A resumed run must continue its schedule, not restart it: the budget
-        # is the new total, so the rate has to pick up where the last epoch
-        # stopped.
+        # A resumed run continues its schedule; the budget is the new total.
         scheduler.last_epoch = resume_step
 
     output = None
     if log_path is not None:
         output_path = Path(log_path)
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        # A resumed run appends: truncating would throw away the earlier epochs.
         resumed = resume_step > 0
         output = output_path.open("a" if resumed else "w", encoding="utf-8")
         if not resumed:
-            output.write("epoch step total_loss velocity_loss\n")
+            output.write("epoch step loss\n")
     if log_to_stdout:
-        print("epoch step total_loss velocity_loss", flush=True)
+        print("epoch step loss", flush=True)
     try:
         step = resume_step
         for epoch in range(completed_epochs + 1, epochs + 1):
             dataset.set_epoch(epoch)
 
             def log_step(step_index, values):
-                line = (
-                    f"{epoch} {step_index} {values['loss']:.8f} "
-                    f"{values['velocity_loss']:.8f}"
-                )
+                line = f"{epoch} {step_index} {values['loss']:.8f}"
                 if output is not None:
                     output.write(line + "\n")
                     output.flush()
@@ -474,10 +412,9 @@ def train_loop(
                 optimizer,
                 device=device,
                 batch_size=batch_size,
-                loss_weights=loss_weights,
+                loss_norm=loss_norm,
                 start_step=step,
                 log_step=log_step,
-                t=t,
                 max_steps=epoch_budget,
                 max_grad_norm=max_grad_norm,
                 scheduler=scheduler,
@@ -487,15 +424,6 @@ def train_loop(
                 grad_clipper=clipper,
             )
             step = int(metrics["last_step"])
-            if validation_dataset is not None:
-                validation_metrics = evaluate_velocity(
-                    model, validation_dataset, device=device,
-                    batch_size=validation_batch_size,
-                )
-                metrics.update({
-                    f"validation_{name}": value
-                    for name, value in validation_metrics.items()
-                })
             early_stop = False
             if bridge_validation_dataset is not None:
                 bridge_validation_dataset.set_epoch(epoch)
@@ -542,10 +470,7 @@ def train_loop(
             budget_truncated = (
                 max_steps is not None and step >= max_steps and completed_epochs < epochs
             )
-            if (
-                epoch_checkpoint_dir is not None
-                and epoch % int(save_every_n_epochs) == 0
-            ):
+            if epoch_checkpoint_dir is not None and epoch % int(save_every_n_epochs) == 0:
                 save_checkpoint(Path(epoch_checkpoint_dir) / f"epoch_{epoch:04d}.pt")
             if max_steps is not None and step >= max_steps:
                 break
@@ -556,7 +481,7 @@ def train_loop(
         if output is not None:
             output.close()
     if best_state is not None and bridge_validation_dataset is not None:
-        # The reference reports the checkpoint with the lowest val_ep_scaled_err.
+        # Report the checkpoint with the lowest val_ep_scaled_err.
         model.load_state_dict(best_state)
         if ema is not None:
             ema.load_state_dict(best_state)
@@ -568,26 +493,36 @@ def train_loop(
 SCHEDULERS = ("constant", "cosine")
 
 
-def total_scheduler_steps(epochs: int, dataset, batch_size: int | str, max_steps: int | None,
-                          max_batches_per_epoch: int | None = None) -> int:
+def total_scheduler_steps(
+    epochs: int,
+    dataset,
+    batch_size: int | str,
+    max_steps: int | None,
+    max_batches_per_epoch: int | None = None,
+) -> int:
     """Optimizer steps the schedule has to cover for the requested budget."""
     if max_batches_per_epoch is not None:
         per_epoch = int(max_batches_per_epoch)
     else:
         per_epoch = max(_batch_size(batch_size, dataset), 1)
-    steps = (-(-len(dataset) // per_epoch) if max_batches_per_epoch is None else per_epoch) * int(epochs)
+    steps = (
+        (-(-len(dataset) // per_epoch) if max_batches_per_epoch is None else per_epoch)
+        * int(epochs)
+    )
     if max_steps is not None:
         steps = min(steps, int(max_steps))
     return max(int(steps), 1)
 
 
-def build_scheduler(optimizer, *, name: str = "constant", total_steps: int = 1,
-                    warmup_fraction: float = 0.0, min_lr_fraction: float = 0.0):
-    """Linear warmup followed by a cosine decay, or ``None`` for a constant rate.
-
-    ``total_steps`` sets the schedule length and ``min_lr_fraction`` the floor at
-    the end of the decay.
-    """
+def build_scheduler(
+    optimizer,
+    *,
+    name: str = "constant",
+    total_steps: int = 1,
+    warmup_fraction: float = 0.0,
+    min_lr_fraction: float = 0.0,
+):
+    """Linear warmup followed by cosine decay, or ``None`` for a constant rate."""
     if name not in SCHEDULERS:
         raise ValueError(f"scheduler must be one of {SCHEDULERS}, got {name!r}")
     if not 0.0 <= warmup_fraction < 1.0:

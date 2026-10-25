@@ -2,13 +2,11 @@
 
 :class:`Structure` holds one molecular or periodic frame: chemical species,
 positions, cell, PBC flags and the atom-wise movement mask. It is built from an
-:class:`ase.Atoms` object by :meth:`Structure.from_ase`, written back to one by
-:meth:`Structure.to_ase`, and constructed directly from arrays.
+:class:`ase.Atoms` object by :meth:`Structure.from_ase`, or directly from arrays.
 """
 from __future__ import annotations
 from dataclasses import dataclass
 from ase import Atoms
-from ase.constraints import FixAtoms
 from ase.data import atomic_numbers
 import numpy as np
 
@@ -70,20 +68,6 @@ class Structure:
             return np.asarray([atomic_numbers[symbol] for symbol in self.species], dtype=int)
         except KeyError as exc:
             raise ValueError(f"unknown chemical symbol {exc.args[0]!r}") from exc
-
-    def to_ase(self) -> Atoms:
-        """Return this frame as an :class:`ase.Atoms` object.
-
-        The returned object carries a ``FixAtoms`` constraint over the atoms
-        whose ``movable_mask`` entry is ``False``, and no calculator.
-        """
-        atoms = Atoms(
-            symbols=self.species, positions=self.positions, cell=self.cell, pbc=self.pbc
-        )
-        fixed_mask = ~self.movable_mask
-        if fixed_mask.any():
-            atoms.set_constraint(FixAtoms(indices=np.where(fixed_mask)[0]))
-        return atoms
 
     @classmethod
     def from_ase(cls, atoms: Atoms) -> "Structure":

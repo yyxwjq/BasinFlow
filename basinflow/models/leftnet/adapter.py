@@ -80,8 +80,7 @@ class LeftNetBridge(nn.Module):
     """``R + P -> TS`` scorer: LEFTNet over the reference 3-fragment layout.
 
     ``forward`` returns ``{"scaled": net_out}``, the bridge regression target
-    ``(x_t - x_0) / sigma_t`` (``reactot/diffusion/en_sb.py:245-250``); no
-    ``{"velocity": ...}`` key is emitted.
+    ``(x_t - x_0) / sigma_t`` (``reactot/diffusion/en_sb.py:245-250``).
 
     ``t`` is the normalised bridge time ``t_sb in (0, 1]`` (``1`` = the
     ``(R + P) / 2`` prior, ``-> 0`` = the transition state), matching
@@ -91,7 +90,7 @@ class LeftNetBridge(nn.Module):
 
     #: Read by the samplers: this module rebuilds its own graph every call.
     builds_own_graph = True
-    #: Read by the loss selector: the objective is the bridge residual, not a velocity.
+    #: The objective is the bridge residual.
     bridge = True
     #: Read by the datasets/workflow: both endpoints are conditioning inputs.
     endpoint_condition = True
@@ -204,6 +203,14 @@ class LeftNetBridge(nn.Module):
     # forward
     # ------------------------------------------------------------------ #
     def forward(self, batch, t: Optional[Tensor] = None) -> dict[str, Tensor]:
+        if bool(batch.pbc.any()):
+            # The reference bridge path is molecular: its edge construction is a
+            # direct distance graph over the three fragments, with no cell offsets.
+            # Refuse periodic frames instead of silently ignoring the lattice.
+            raise ValueError(
+                "leftnet_sb supports non-periodic molecular frames; "
+                "use painn or egnn for pbc=True"
+            )
         z = batch.z.to(torch.long)
         reactant = batch.reactant_pos
         state = batch.pos

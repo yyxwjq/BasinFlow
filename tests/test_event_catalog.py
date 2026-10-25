@@ -6,12 +6,13 @@ import ase.io
 from basinflow.data import (
     Event,
     EventCatalog,
-    EventSplit,
     Structure,
+    check_split,
     event_target,
     load_events,
     load_split,
     ordered_event_ids,
+    partition,
     save_split,
 )
 
@@ -36,45 +37,50 @@ def test_event_target_is_the_mic_displacement_and_the_lifted_endpoint():
     assert not hasattr(target, "direction")
 
 
-def test_event_split_round_trips_and_selects_whole_events(tmp_path):
+def test_split_round_trips_and_selects_whole_events(tmp_path):
     catalog = _catalog()
-    split = EventSplit(train_ids=("0",), val_ids=(), test_ids=())
+    split = {"train": ("0",), "val": (), "test": ()}
     path = tmp_path / "split.csv"
 
     save_split(split, path)
     loaded = load_split(path, catalog)
 
-    assert loaded == split
-    assert loaded.select(catalog, "train").event_ids == ["0"]
+    assert loaded == check_split(split)
+    assert catalog.select(partition(loaded, "train")).event_ids == ["0"]
 
 
 @pytest.mark.parametrize(
-    "train_ids,val_ids,test_ids",
+    "split",
     [
-        (("0",), ("0",), ()),
-        (("0",), (), ("0",)),
-        (("0", "0"), (), ()),
+        {"train": ("0",), "val": ("0",), "test": ()},
+        {"train": ("0",), "val": (), "test": ("0",)},
+        {"train": ("0", "0"), "val": (), "test": ()},
     ],
 )
-def test_event_split_rejects_ambiguous_membership(train_ids, val_ids, test_ids):
-    with pytest.raises(ValueError, match="overlap|duplicate"):
-        EventSplit(train_ids=train_ids, val_ids=val_ids, test_ids=test_ids)
+def test_check_split_rejects_ambiguous_membership(split):
+    with pytest.raises(ValueError, match="repeat"):
+        check_split(split)
+
+
+def test_check_split_requires_every_partition():
+    with pytest.raises(ValueError, match="exactly the partitions"):
+        check_split({"train": ("0",), "val": ()})
 
 
 def test_selecting_an_unknown_event_is_an_error_not_an_empty_catalog():
     catalog = _catalog()
-    split = EventSplit(train_ids=("7",), val_ids=(), test_ids=())
+    split = {"train": ("7",), "val": (), "test": ()}
 
     with pytest.raises(KeyError, match="unknown event ids"):
-        split.select(catalog, "train")
+        catalog.select(partition(split, "train"))
 
 
-def test_event_split_freezes_list_membership_without_reordering():
+def test_check_split_freezes_list_membership_without_reordering():
     identifiers = ["2", "1"]
-    split = EventSplit(train_ids=identifiers, val_ids=[], test_ids=[])
+    split = check_split({"train": identifiers, "val": [], "test": []})
     identifiers.append("3")
 
-    assert split.train_ids == ("2", "1")
+    assert split["train"] == ("2", "1")
 
 
 def test_event_catalog_has_no_second_index_to_keep_in_sync():

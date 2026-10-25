@@ -209,8 +209,8 @@ def main(argv: list[str] | None = None) -> int:
     report_path = run_dir / "report.json"
     split = "val"
     if report_path.is_file():
-        evaluation = json.loads(report_path.read_text(encoding="utf-8")).get("evaluation", {})
-        split = str(evaluation.get("split", split))
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        split = str(report.get("evaluation_split", split))
 
     plt = _matplotlib()
     if args.per_event:

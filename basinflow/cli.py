@@ -14,7 +14,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     train_ts = commands.add_parser(
         "train-transition1x-ts",
-        help="train and sample an R+P-to-TS model (LEFTNet bridge or PaiNN/EGNN baseline)",
+        help="train and sample an R+P-to-TS bridge model (leftnet_sb, painn or egnn)",
     )
     train_ts.add_argument("--config", required=True, help="path to an INI config")
     return parser

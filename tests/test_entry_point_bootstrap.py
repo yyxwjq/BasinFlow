@@ -1,15 +1,14 @@
 """Entry points must make ``basinflow`` importable on their own.
 
-The package uses a ``src/`` layout and is not assumed to be installed, so every
-script under ``examples/`` and ``tools/`` that imports ``basinflow`` has to put
-``REPO_ROOT/src`` on ``sys.path`` first. One tool shipped without that preamble
-and died with ``ModuleNotFoundError`` on its first run, which is the regression
-these tests pin down.
+The package is not assumed to be installed, so every script under ``tools/`` that
+imports ``basinflow`` has to put ``REPO_ROOT`` on ``sys.path`` first. One tool
+shipped without that preamble and died with ``ModuleNotFoundError`` on its first
+run, which is the regression these tests pin down.
 """
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-ENTRY_DIRS = ("examples", "tools")
+ENTRY_DIRS = ("tools",)
 CANONICAL = "sys.path.insert(0, str(REPO_ROOT))"
 
 

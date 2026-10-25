@@ -92,14 +92,6 @@ def unsorted_segment_sum(
 # --------------------------------------------------------------------------- #
 # small helpers (reactot/model/leftnet.py:18-29)
 # --------------------------------------------------------------------------- #
-def swish(x: Tensor) -> Tensor:
-    return x * torch.sigmoid(x)
-
-
-def com(x: Tensor) -> Tensor:
-    return x - torch.mean(x, dim=0)
-
-
 def remove_mean_batch(x: Tensor, indices: Tensor) -> Tensor:
     mean = scatter_mean(x, indices, dim=0)
     return x - mean[indices]

@@ -1,1 +1,1 @@
-"""ODE integration for the velocity-flow baselines and the ReactOT bridge."""
+"""ODE integration for the ReactOT bridge sampler."""

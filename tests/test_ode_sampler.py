@@ -6,7 +6,6 @@ meaning for the step argument (a *saved-point* grid, not a step count).
 """
 from __future__ import annotations
 
-import numpy as np
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -92,18 +91,6 @@ def test_adaptive_solves_to_the_requested_tolerance_and_euler_does_not():
     assert abs(float(adaptive) - 1.0) < 1e-5
     assert abs(float(euler) - 1.0) > 1e-2
     assert report["integration_steps"] == 9
-
-
-def test_record_returns_the_saved_trajectory():
-    field = lambda state, t: torch.ones_like(state)  # noqa: E731
-    final, report = sample_ode(field, torch.zeros(2), num_steps=6, record=True)
-
-    assert len(report["states"]) == 6
-    assert torch.allclose(report["states"][0], torch.zeros(2))
-    assert torch.allclose(report["states"][-1], final)
-    # Monotone in t on the saved grid.
-    heights = [float(state[0]) for state in report["states"]]
-    assert heights == sorted(heights)
 
 
 def test_a_single_saved_point_is_rejected_rather_than_doing_nothing():

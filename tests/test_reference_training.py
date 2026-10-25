@@ -1,11 +1,13 @@
-"""Reference training-contract tests: batching, clipping and the loss scale."""
+"""Reference training-contract tests: batching, clipping and the bridge loss."""
 from __future__ import annotations
+
+from types import SimpleNamespace
 
 import pytest
 
 torch = pytest.importorskip("torch")
 
-from basinflow.models import flow_loss  # noqa: E402
+from basinflow.models import bridge_loss  # noqa: E402
 from basinflow.training.batch_sampler import NodeSquareBatchSampler  # noqa: E402
 from basinflow.training.grad_clip import AdaptiveGradClipper  # noqa: E402
 
@@ -69,13 +71,14 @@ def test_adaptive_clipper_clips_to_the_rolling_bound():
 def test_bridge_loss_is_plain_mse_like_en_sb():
     prediction = torch.zeros(2, 3)
     target = torch.full((2, 3), 2.0)
-    batch = {"target_scaled": target, "movable_mask": torch.ones(2, dtype=torch.bool)}
+    batch = SimpleNamespace(
+        target_scaled=target, movable_mask=torch.ones(2, dtype=torch.bool)
+    )
 
-    total, parts = flow_loss({"scaled": prediction}, batch)
+    loss = bridge_loss({"scaled": prediction}, batch)
 
     # SBModule returns EnSB.forward's F.mse_loss, with no fragment scale.
-    assert float(total) == pytest.approx(4.0)
-    assert float(parts["scaled_loss"]) == pytest.approx(4.0)
+    assert float(loss) == pytest.approx(4.0)
 
 
 def test_reference_checkpoint_key_mapping_roundtrips(tmp_path):
@@ -124,6 +127,7 @@ def test_bridge_validation_metric_is_zero_for_a_perfect_prediction():
 
     from basinflow.data import Event, EventCatalog, Structure
     from basinflow.data.samples import BridgeFlowDataset
+    from basinflow.models.sb import SBSchedule
     from basinflow.training.validation import evaluate_bridge_scaled_error
 
     def structure(offset: float) -> Structure:
@@ -136,7 +140,9 @@ def test_bridge_validation_metric_is_zero_for_a_perfect_prediction():
             "1": Event("1", structure(0.3), structure(0.4), transition_state=structure(0.35)),
         }
     )
-    dataset = BridgeFlowDataset(catalog, timesteps=16, lowest_step=1)
+    dataset = BridgeFlowDataset(
+        catalog, SBSchedule(timesteps=16, beta_max=0.3, power=0.5, inv_power=1.0), lowest_step=1
+    )
 
     class PerfectModel(torch.nn.Module):
         def forward(self, batch):

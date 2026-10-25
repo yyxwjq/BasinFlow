@@ -1,22 +1,93 @@
+"""The PaiNN backbone: one graph builder, one bridge output contract."""
 from __future__ import annotations
 
 import torch
 from torch import nn
 
-from basinflow.geometry.bonds import BOND_CHANGE_CLASSES
-
+from basinflow.geometry.graph import torch_neighbor_graph_from_batch
+from basinflow.models.sb import remove_mean_batch
 from .layers import DualMessageBlock, GaussianFourierBasis, GatedEquivariantBlock, RadialBasis, UpdateBlock
 
 
-class DualPaiNN(nn.Module):
-    """Tensor backbone with LiFlow-style positions_1/positions_2 graph inputs.
+def prepare_flow_input(data, cutoff, time=None):
+    """Adapt one :class:`EventData` batch to the PaiNN tensor API.
 
-    positions_1 is the unperturbed reactant, positions_2 the current flow state.
-    Edge shifts are Cartesian, and edges point from receiver to sender.
-    Time is atom-level [N]. No source-noise or target fields are consumed.
+    The graph is the union of the reference (reactant) and current radii and is
+    built once by :func:`torch_neighbor_graph_from_batch`, which also supplies the
+    minimum-image edge vectors for both geometries.
     """
+    current = data.pos
+    reference = data.reactant_pos
+    if reference.shape != current.shape:
+        raise ValueError("reactant_pos and pos must have matching [N, 3] shapes")
+    graph_ids = data.batch
+    graph = torch_neighbor_graph_from_batch(
+        data, cutoff=cutoff, reference_positions=reference
+    )
+    cells = data.cell.reshape(-1, 3, 3).to(current)
+    shifts = torch.einsum(
+        "ei,eij->ej",
+        graph["cell_offsets"].to(current),
+        cells[graph_ids[graph["edge_index"][0]]],
+    )
+    if time is None:
+        time = data.flow_time
+    time = torch.as_tensor(time, dtype=current.dtype, device=current.device).reshape(-1)
+    num_graphs = int(graph_ids.max()) + 1 if graph_ids.numel() else 0
+    if time.numel() == 1:
+        time = time.expand(len(current))
+    elif time.numel() == num_graphs:
+        time = time[graph_ids]
+    elif time.numel() != len(current):
+        raise ValueError("flow time must be scalar, per graph or per node")
+    return {
+        "positions_1": reference,
+        "positions_2": current,
+        "elements": data.z,
+        "edge_index": graph["edge_index"],
+        "reference_vectors": graph["edge_vectors_2"],
+        "current_vectors": graph["edge_vectors"],
+        "endpoint_pos": data.endpoint_pos,
+        "shifts": shifts,
+        "time": time,
+        "movable": data.movable_mask,
+        "batch": graph_ids,
+    }
 
-    def __init__(self, num_features=128, num_radial_basis=32, num_layers=4, num_elements=119, r_max=5.0, time_dim=32, radial_basis="bessel", envelope="polynomial", stability_mode="scaled", bond_change_condition=False, bond_change_direction=False, endpoint_condition=False, endpoint_equivariant=False, time_scale=1.0,
+
+class PaiNN(nn.Module):
+    """Bridge adapter around the dual-geometry PaiNN backbone."""
+
+    builds_own_graph = True
+    bridge = True
+    endpoint_condition = True
+    endpoint_equivariant = True
+
+    def __init__(self, num_features=128, num_radial_basis=32, num_layers=4,
+                 num_elements=119, r_max=5.0, time_dim=32, radial_basis="bessel",
+                 envelope="polynomial", stability_mode="scaled", time_scale=1.0,
+                 time_per_layer=False):
+        super().__init__()
+        self.r_max = float(r_max)
+        self.cutoff = self.r_max
+        self.backbone = DualPaiNN(
+            num_features, num_radial_basis, num_layers, num_elements, r_max,
+            time_dim, radial_basis, envelope, stability_mode, time_scale,
+            time_per_layer,
+        )
+
+    def forward(self, batch, t=None):
+        prepared = prepare_flow_input(batch, self.r_max, t)
+        net_out = self.backbone(prepared)["net_out"]
+        return {"scaled": remove_mean_batch(net_out, batch.batch)}
+
+
+class DualPaiNN(nn.Module):
+    """PaiNN over three edge geometries: reactant, current state and product."""
+
+    def __init__(self, num_features=128, num_radial_basis=32, num_layers=4,
+                 num_elements=119, r_max=5.0, time_dim=32, radial_basis="bessel",
+                 envelope="polynomial", stability_mode="scaled", time_scale=1.0,
                  time_per_layer=False):
         super().__init__()
         if stability_mode not in {"scaled", "bounded", "none"}:
@@ -24,32 +95,24 @@ class DualPaiNN(nn.Module):
         if num_features < 2 or num_layers < 1 or num_elements < 2:
             raise ValueError("features/elements must be at least two and layers positive")
         self.atom_embedding = nn.Embedding(num_elements, num_features)
-        # ``time_scale`` widens the Fourier frequencies.
         self.time_embedding = GaussianFourierBasis(time_dim, scale=float(time_scale))
-        self.scalar_input = nn.Sequential(nn.Linear(num_features + time_dim + 2, num_features), nn.SiLU(), nn.Linear(num_features, num_features))
-        self.vector_input = nn.Linear(1, num_features, bias=False)
-        if bond_change_direction and not bond_change_condition:
-            raise ValueError("bond_change_direction requires bond_change_condition")
-        self.bond_change_direction = bool(bond_change_direction)
-        # Present only for the directional arm.
-        self.condition_vector_input = (
-            nn.Linear(1, num_features, bias=False)
-            if (bond_change_condition and bond_change_direction) else None
+        self.scalar_input = nn.Sequential(
+            nn.Linear(num_features + time_dim + 1, num_features),
+            nn.SiLU(),
+            nn.Linear(num_features, num_features),
         )
+        self.vector_input = nn.Linear(1, num_features, bias=False)
         self.radial = RadialBasis(num_radial_basis, r_max, radial_basis, envelope)
-        self.bond_change_condition = bool(bond_change_condition)
-        if endpoint_equivariant and not endpoint_condition:
-            raise ValueError("endpoint_equivariant requires endpoint_condition")
-        self.endpoint_condition = bool(endpoint_condition)
-        self.endpoint_equivariant = bool(endpoint_equivariant)
-        # ``time_per_layer`` gives every message block its own view of the clock.
         gate_features = time_dim if time_per_layer else 0
-        self.messages = nn.ModuleList([DualMessageBlock(num_features, num_radial_basis, stability_mode,
-                                                       self.bond_change_condition,
-                                                       self.endpoint_condition,
-                                                       self.endpoint_equivariant,
-                                                       gate_features) for _ in range(num_layers)])
-        self.updates = nn.ModuleList([UpdateBlock(num_features, stability_mode) for _ in range(num_layers)])
+        self.messages = nn.ModuleList(
+            [
+                DualMessageBlock(num_features, num_radial_basis, stability_mode, gate_features)
+                for _ in range(num_layers)
+            ]
+        )
+        self.updates = nn.ModuleList(
+            [UpdateBlock(num_features, stability_mode) for _ in range(num_layers)]
+        )
         self.output = GatedEquivariantBlock(num_features, stability_mode)
 
     def forward(self, data):
@@ -58,81 +121,39 @@ class DualPaiNN(nn.Module):
         elements = data["elements"]
         if elements.dtype != torch.long or elements.shape != (len(current),):
             raise ValueError("elements must be int64 [N] atomic numbers")
-        if elements.numel() and (elements.min() < 1 or elements.max() >= self.atom_embedding.num_embeddings):
+        if elements.numel() and (
+            elements.min() < 1 or elements.max() >= self.atom_embedding.num_embeddings
+        ):
             raise ValueError("atomic number outside embedding vocabulary")
-        reference_vector = reference[sender] - reference[receiver] + data["shifts"]
-        current_vector = current[sender] - current[receiver] + data["shifts"]
+
+        reference_vector = data["reference_vectors"]
+        current_vector = data["current_vectors"]
         reference_length = torch.linalg.vector_norm(reference_vector, dim=-1)
         current_length = torch.linalg.vector_norm(current_vector, dim=-1)
         reference_unit = reference_vector / reference_length.clamp_min(1e-8)[:, None]
         current_unit = current_vector / current_length.clamp_min(1e-8)[:, None]
         reference_radial, reference_cutoff = self.radial(reference_length)
         current_radial, current_cutoff = self.radial(current_length)
-        endpoint = None
-        if self.endpoint_condition:
-            # The conditioning endpoint (the product of an R+P -> TS task) is
-            # lifted onto the same edge set, so its directions can enter the
-            # vector message rather than only its distances.
-            if "endpoint_pos" not in data:
-                raise ValueError("endpoint_condition is enabled but no endpoint was passed")
-            endpoint_positions = data["endpoint_pos"]
-            endpoint_vector = endpoint_positions[sender] - endpoint_positions[receiver] + data["shifts"]
-            endpoint_length = torch.linalg.vector_norm(endpoint_vector, dim=-1)
-            endpoint_unit = endpoint_vector / endpoint_length.clamp_min(1e-8)[:, None]
-            endpoint_radial, endpoint_cutoff = self.radial(endpoint_length)
-            endpoint = (endpoint_radial, endpoint_cutoff, endpoint_unit)
-        conditions = data.get("node_conditions", current.new_zeros((len(current), 2)))
+
+        endpoint_vector = (
+            data["endpoint_pos"][sender] - data["endpoint_pos"][receiver] + data["shifts"]
+        )
+        endpoint_length = torch.linalg.vector_norm(endpoint_vector, dim=-1)
+        endpoint_unit = endpoint_vector / endpoint_length.clamp_min(1e-8)[:, None]
+        endpoint_radial, endpoint_cutoff = self.radial(endpoint_length)
+
         time_embedding = self.time_embedding(data["time"])
-        scalar = self.scalar_input(torch.cat([self.atom_embedding(elements), time_embedding, conditions], dim=-1))
+        conditions = data["movable"].to(current.dtype).unsqueeze(-1)
+        scalar = self.scalar_input(
+            torch.cat([self.atom_embedding(elements), time_embedding, conditions], dim=-1)
+        )
         vector = self.vector_input((current - reference)[:, :, None])
-        bond_change = None
-        if self.bond_change_condition:
-            bond_change = _bond_change_one_hot(data, receiver, sender, current.dtype)
-            # The discrete condition says which bonds change; this says in which
-            # direction the two atoms of such a bond have to move. At t = 0 the
-            # current and reference geometries coincide, so without this the
-            # initial vector features are exactly zero and the network has to
-            # synthesise every direction from invariant inputs.
-            if self.condition_vector_input is not None:
-                vector = vector + self.condition_vector_input(
-                    _bond_change_direction(reference, receiver, sender, bond_change)[:, :, None]
-                )
         for message, update in zip(self.messages, self.updates):
-            scalar, vector = message(scalar, vector, reference_radial, current_radial, reference_cutoff, current_cutoff, reference_unit, current_unit, data["edge_index"], bond_change, endpoint, time_embedding)
+            scalar, vector = message(
+                scalar, vector, reference_radial, current_radial,
+                reference_cutoff, current_cutoff, reference_unit, current_unit,
+                endpoint_radial, endpoint_cutoff, endpoint_unit,
+                data["edge_index"], time_embedding,
+            )
             scalar, vector = update(scalar, vector)
-        return {"velocity": self.output(scalar, vector), "hidden": scalar}
-
-
-def _bond_change_direction(reference, receiver, sender, bond_change):
-    """Per-atom pull towards a forming bond and away from a breaking one.
-
-    Returns an equivariant ``[N, 3]`` field built from the reference geometry
-    and the discrete labels only, so no product coordinate enters.
-    """
-    unit = reference[sender] - reference[receiver]
-    unit = unit / unit.norm(dim=-1, keepdim=True).clamp_min(1e-8)
-    signed = (bond_change[:, 1] - bond_change[:, 2])[:, None] * unit
-    direction = reference.new_zeros((reference.shape[0], 3))
-    direction = direction.index_add(0, receiver, signed)
-    return direction.index_add(0, sender, -signed)
-
-
-def _bond_change_one_hot(data, receiver, sender, dtype):
-    """Per-edge ``[unchanged, formed, broken]`` one-hot from the condition tensor.
-
-    ``data["bond_change"]`` is a padded ``[B, n_max, n_max]`` label matrix and
-    carries no coordinate, so no product geometry reaches the model through this
-    path.  It is an input condition: the supervised view takes it from the
-    reactant/product difference, the basin view takes it from the seed.
-    """
-    labels = data["bond_change"]
-    if labels.dim() != 3:
-        raise ValueError(f"bond_change must be [B, n_max, n_max], got {tuple(labels.shape)}")
-    graph_of_node = data["batch"]
-    counts = torch.bincount(graph_of_node, minlength=labels.shape[0])
-    offsets = torch.cumsum(counts, dim=0) - counts
-    local = torch.arange(len(graph_of_node), device=graph_of_node.device) - offsets[graph_of_node]
-    graph_r, graph_s = graph_of_node[receiver], graph_of_node[sender]
-    local_r, local_s = local[receiver], local[sender]
-    pair_labels = labels[graph_r, local_r, local_s].long().clamp_(0, 2)
-    return torch.nn.functional.one_hot(pair_labels, num_classes=BOND_CHANGE_CLASSES).to(dtype)
+        return {"net_out": self.output(scalar, vector)}

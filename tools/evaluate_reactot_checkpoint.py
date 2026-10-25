@@ -20,7 +20,7 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
-from basinflow.data import load_events, load_split
+from basinflow.data import load_events, load_split, partition
 from basinflow.evaluation.bridge import run_bridge_trials
 from basinflow.models.reference import load_reactot_checkpoint
 from basinflow.models.sb import DEFAULT_T_EPS, SBSchedule
@@ -41,7 +41,7 @@ def main() -> int:
 
     catalog = load_events(args.events)
     split = load_split(args.events / "split.csv", catalog)
-    identifiers = split.partition(args.split)
+    identifiers = partition(split, args.split)
     if not identifiers:
         raise SystemExit(f"split {args.split!r} is empty")
     test_catalog = catalog.select(identifiers, name=args.split)
@@ -59,7 +59,6 @@ def main() -> int:
         model=model,
         catalog=test_catalog,
         output_dir=args.output,
-        cutoff=float(model.cutoff),
         num_steps=int(args.steps),
         schedule=schedule,
         trials_per_event=int(args.trials),
